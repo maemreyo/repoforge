@@ -169,6 +169,9 @@ class ErrorCode(str, Enum):
     DELEGATION_APPROVAL_REQUIRED = "DELEGATION_APPROVAL_REQUIRED"
     PROFILE_NOT_MODEL_INVOCABLE = "PROFILE_NOT_MODEL_INVOCABLE"
     PROFILE_RERUN_TOO_SOON = "PROFILE_RERUN_TOO_SOON"
+    PROTECTED_REF_WRITE_BLOCKED = "PROTECTED_REF_WRITE_BLOCKED"
+    DESTRUCTIVE_REMOTE_OPERATION_BLOCKED = "DESTRUCTIVE_REMOTE_OPERATION_BLOCKED"
+    IRREVERSIBLE_LOCAL_OPERATION_BLOCKED = "IRREVERSIBLE_LOCAL_OPERATION_BLOCKED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,6 +450,9 @@ def operation_error_from_exception(
         ErrorCode.DELEGATION_APPROVAL_REQUIRED: "A delegated-human commit lacks the represented actor and explicit approval evidence required by policy.",
         ErrorCode.PROFILE_NOT_MODEL_INVOCABLE: "The reviewed configuration reserves this profile for the operator and CI, because it is expensive enough that the decision to run it is not the model's to make.",
         ErrorCode.PROFILE_RERUN_TOO_SOON: "This profile ran against the same workspace snapshot too recently; the reviewed configuration bounds how often it may repeat.",
+        ErrorCode.PROTECTED_REF_WRITE_BLOCKED: "The target ref is protected by repository policy and is not writable through this operation.",
+        ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED: "The requested remote operation would force, mirror, or delete a ref and is blocked by the non-bypassable circuit-breaker contract regardless of authorization posture.",
+        ErrorCode.IRREVERSIBLE_LOCAL_OPERATION_BLOCKED: "The requested command rewrites local history, destroys recovery information, or executes arbitrary code through a git hook point, and is blocked by the non-bypassable circuit-breaker contract.",
     }.get(code, "The requested operation did not satisfy a validated policy or runtime invariant.")
     return OperationError(
         code,

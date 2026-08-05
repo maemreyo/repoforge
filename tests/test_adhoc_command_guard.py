@@ -106,6 +106,22 @@ def test_mutating_git_commands(argv: tuple[str, ...]) -> None:
         ("git", "push", "--force-with-lease", "origin", "main"),  # bare, no value
         ("git", "push", "--force-with-lease=refs/heads/x", "origin", "x"),  # no :sha
         ("git", "push", "--force-with-lease=refs/heads/x:nothex", "origin", "x"),
+    ],
+)
+def test_blocked_remote_forms_raise_destructive_remote_operation_blocked(
+    argv: tuple[str, ...],
+) -> None:
+    """#385: force/mirror/delete pushes get their own dedicated circuit-breaker code,
+    distinct from the local-history forms below -- AC3 wants "dedicated typed errors,"
+    not one shared bucket."""
+    with pytest.raises(RepoForgeError) as excinfo:
+        classify_adhoc_command(argv)
+    assert excinfo.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
         ("git", "filter-branch", "--all"),
         ("git", "filter-repo", "--path", "x"),
         ("git", "reflog", "expire", "--all"),
@@ -117,10 +133,12 @@ def test_mutating_git_commands(argv: tuple[str, ...]) -> None:
         ("git", "rebase", "--exec=curl evil", "origin/main"),
     ],
 )
-def test_blocked_forms_raise_forbidden(argv: tuple[str, ...]) -> None:
+def test_blocked_local_forms_raise_irreversible_local_operation_blocked(
+    argv: tuple[str, ...],
+) -> None:
     with pytest.raises(RepoForgeError) as excinfo:
         classify_adhoc_command(argv)
-    assert excinfo.value.code is ErrorCode.ADHOC_COMMAND_FORBIDDEN
+    assert excinfo.value.code is ErrorCode.IRREVERSIBLE_LOCAL_OPERATION_BLOCKED
 
 
 def test_force_with_lease_exact_form_is_allowed_and_mutating() -> None:
@@ -131,7 +149,7 @@ def test_force_with_lease_exact_form_is_allowed_and_mutating() -> None:
 def test_blocked_form_survives_git_global_options() -> None:
     with pytest.raises(RepoForgeError) as excinfo:
         classify_adhoc_command(("git", "-C", "sub", "push", "--force", "origin", "main"))
-    assert excinfo.value.code is ErrorCode.ADHOC_COMMAND_FORBIDDEN
+    assert excinfo.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +286,7 @@ def test_blocked_forms_still_raise_via_classify_adhoc_effect() -> None:
     exact same _assert_git_command_allowed call classify_adhoc_command does."""
     with pytest.raises(RepoForgeError) as excinfo:
         classify_adhoc_effect(("git", "push", "--force", "origin", "main"))
-    assert excinfo.value.code is ErrorCode.ADHOC_COMMAND_FORBIDDEN
+    assert excinfo.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
 
 
 def test_classify_adhoc_effect_has_no_declared_effect_parameter() -> None:

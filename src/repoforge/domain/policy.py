@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from ..config import RepositoryConfig
+from .circuit_breakers import CircuitBreakerCategory, circuit_breaker_blocked
 from .errors import SecurityError, WorkspaceError
 from .workspace import WorkspaceKind
 
@@ -44,7 +45,14 @@ def validate_adopted_branch(branch: str, repo: RepositoryConfig) -> None:
       injection into git, not a style preference.
     """
     if branch in repo.protected_branches:
-        raise SecurityError(f"Protected branch is not writable: {branch}")
+        raise circuit_breaker_blocked(
+            CircuitBreakerCategory.PROTECTED_REF_WRITE,
+            f"Protected branch is not writable: {branch}",
+            safe_next_action=(
+                "Choose a non-protected branch, or ask the operator to perform this write "
+                "directly if the protected ref genuinely needs to change."
+            ),
+        )
     if (
         not _SAFE_BRANCH_RE.fullmatch(branch)
         or ".." in branch

@@ -284,4 +284,4 @@ def test_force_push_is_blocked_for_every_workspace_kind(tmp_path: Path) -> None:
             service.workspace_run_adhoc(
                 workspace_id, ["git", "push", "--force", "origin", record.branch]
             )
-        assert excinfo.value.code is ErrorCode.ADHOC_COMMAND_FORBIDDEN
+        assert excinfo.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED

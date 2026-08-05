@@ -1,14 +1,18 @@
 # Autonomy Policy Model
 
-- Version: v5
-- Status: **DRAFT — architecture review round 4, host-effect matrix added in v5.** Policy decisions are
-  settled where marked "settled" in §13. Platform tool exposure, publication-override wiring,
-  containment, credential handling, compatibility migration, and backend enforcement proof remain gated
-  by the implementing issues cited in §13, including #375, #381, #384, #395, #400, #406, and #407 — this
-  document gives those issues stable terms; it does not claim their implementation evidence. §14 (v5)
-  settles the host-effect matrix's categories and default classification #405 owned; it does not, and
-  cannot yet, prove enforcement, because the `trusted_host` lease (#383) and `sandboxed` backend (#384)
-  §14 classifies against do not exist yet — see §14's own honesty note on this.
+- Version: v6
+- Status: **DRAFT — architecture review round 4, host-effect matrix added in v5, circuit-breaker
+  contract added in v6.** Policy decisions are settled where marked "settled" in §13. Platform tool
+  exposure, publication-override wiring, containment, credential handling, compatibility migration, and
+  backend enforcement proof remain gated by the implementing issues cited in §13, including #375, #381,
+  #383, #384, #395, #400, #406, and #407 — this document gives those issues stable terms; it does not claim
+  their implementation evidence. §14 (v5) settles the host-effect matrix's categories and default
+  classification #405 owned; it does not, and cannot yet, prove enforcement, because the `trusted_host`
+  lease (#383) and `sandboxed` backend (#384) §14 classifies against do not exist yet — see §14's own
+  honesty note on this. §15 (v6) settles the non-bypassable circuit-breaker contract #385 owned
+  (categories, hook points, dedicated errors, override shape); adversarial proof that these breakers
+  hold under attack remains #406/#407's job against a real `sandboxed` backend, exactly as #385's own
+  scope says — §15 does not claim that proof either.
 - Key: `autonomy-policy-model`
 - Implements: [#370](https://github.com/maemreyo/repoforge/issues/370)
 - Read by: every issue under EPIC [#369](https://github.com/maemreyo/repoforge/issues/369) that defines
@@ -16,6 +20,21 @@
 
 ## Changelog
 
+- **v6** — Added §15, closing #385: the non-bypassable circuit-breaker contract — six categories
+  (protected-ref write, destructive-remote-operation, irreversible-local-operation,
+  secret-material-exposure, control-plane-state-mutation, repository-deletion) each mapped to a
+  dedicated `ErrorCode` (three newly added: `PROTECTED_REF_WRITE_BLOCKED`,
+  `DESTRUCTIVE_REMOTE_OPERATION_BLOCKED`, `IRREVERSIBLE_LOCAL_OPERATION_BLOCKED`; one pre-existing,
+  `CREDENTIAL_LEAK_BLOCKED`, cited rather than duplicated; two reserved for categories prevented by
+  construction, not exception) and an `EnforcementHookPoint` naming the existing
+  prepare/execute/inspect convention rather than a new hook-registration mechanism. Also settles AC2
+  (already true: `ExecutionScope.__post_init__`'s cwd-inside-root check is admission, not
+  containment — same finding §14 made, now confirmed for this contract too) and adds
+  `OperatorOverrideAttestation` as an interface-only shape for #375/#395 to eventually produce, not an
+  issuance mechanism #385 builds. Extended `EnforcementAssessment` with `socket`/`mount`/`symlink`
+  dimensions, type-level only (`UNSUPPORTED` by default), per the same "type contract now, real
+  enforcement later" precedent §13 already used for #380 AC4. Backend-enforcement adversarial proof
+  stays #406/#407's job, per #385's own stated scope — this version does not claim it.
 - **v5** — Added §14, closing #405: the host-effect matrix, covering filesystem-outside-checkout,
   process, network-egress, sockets/daemons, and package-manager-hooks effect categories, each mapped to a
   default classification (`allowed` / `denied` / `lease-gated` / `observed-only`) per #405's AC1. Settled
@@ -204,15 +223,24 @@ conflated with any of the three outcomes above.
 
 ## 6. Non-bypassable controls (execution vs. publication-override authority separated)
 
-No posture or lease lifts any of the following as a **default**:
+No posture or lease lifts any of the following as a **default**. Each is now also a named category
+in §15's circuit-breaker contract (`CircuitBreakerCategory`), with its own dedicated `ErrorCode` where
+an active reject call site exists:
 
-1. Protected-ref write (`validate_adopted_branch`, `domain/policy.py:44`) — with one narrow exception:
+1. Protected-ref write (`validate_adopted_branch`, `domain/policy.py:33`, raising
+   `PROTECTED_REF_WRITE_BLOCKED` via §15's `circuit_breaker_blocked()`) — with one narrow exception:
    #375 requires a separate **higher-order operator override authority**, distinct in kind from an
-   ordinary `trusted_host` lease. An ordinary lease cannot silently acquire this.
+   ordinary `trusted_host` lease. An ordinary lease cannot silently acquire this; §15's
+   `OperatorOverrideAttestation` is the shape that authority must eventually produce, not a mechanism
+   #385 itself builds.
 2. **Force-push — current implementation vs. target policy, kept separate:**
    - *Current implementation:* bare `--force`, `--mirror`, and branch deletion are blocked by
-     `_assert_git_command_allowed`; exact `--force-with-lease=<ref>:<sha>` is permitted by that same
-     guard today (`domain/adhoc.py:175-191`).
+     `_assert_git_command_allowed` (`domain/adhoc.py:214`), raising the dedicated
+     `DESTRUCTIVE_REMOTE_OPERATION_BLOCKED`; exact `--force-with-lease=<ref>:<sha>` is permitted by that
+     same guard today. History-rewriting/arbitrary-execution forms blocked by the same function
+     (`filter-branch`, `rebase -x`, `reflog expire`, `update-ref -d`, `clean --force`) raise the
+     separately dedicated `IRREVERSIBLE_LOCAL_OPERATION_BLOCKED` instead — §15 AC3 required these not
+     share one generic code.
    - *Target autonomy policy — not yet decided:* whether that exact-form allowance should remain a
      normal guarded push, become an operator-only history-rewrite authority, or be blocked from generic
      shell entirely and reserved for a typed tool. #375 ("remote force/delete blocked by default in
@@ -221,9 +249,14 @@ No posture or lease lifts any of the following as a **default**:
    - Generic shell or an opaque wrapper around git: the argv guard cannot evaluate it at all (§8); the
      hard safeguard for that case is the enforcement adapter (#385/#406/#407), not argv parsing.
    - Silent or unscoped force push is prohibited in every posture without exception.
-3. Secret or credential export as a tool response payload.
-4. Direct mutation of RepoForge control-plane state outside its own typed write path.
-5. Repository deletion.
+3. Secret or credential export as a tool response payload (`CREDENTIAL_LEAK_BLOCKED`, pre-existing;
+   §15's `SECRET_MATERIAL_EXPOSURE` category cites it as already satisfying this control).
+4. Direct mutation of RepoForge control-plane state outside its own typed write path. No tool exposes
+   a path to this effect at all -- §15 marks `CONTROL_PLANE_STATE_MUTATION` as prevented by
+   construction, not by an active reject call site, and says so explicitly rather than implying a
+   guard that doesn't exist.
+5. Repository deletion. Same as point 4: no tool exposes this effect; §15's `REPOSITORY_DELETION`
+   category is prevented by construction, not by exception.
 6. **Governed publication override authority (§5, outcome 2) is not granted by an execution lease.** A
    `trusted_host` lease authorizes *where and how broadly commands run* (§4); it does not by itself
    authorize *skipping verification inside the typed publication path*. Those are two different
@@ -356,6 +389,13 @@ capability negotiation validated through #404 before the old surface is removed.
 - **Host-effect matrix** — the filesystem/process/network/daemon/package-manager categories and their
   default `allowed` / `denied` / `lease-gated` / `observed-only` classification, for effects outside the
   checkout (§14). Fills the `host_effect_scope` field in §7's lease record.
+- **Circuit-breaker contract** — the six `CircuitBreakerCategory` values, each with a dedicated
+  `ErrorCode` and an `EnforcementHookPoint` (§15). Distinct from the host-effect matrix (§14): §15
+  covers controls already reachable and enforced today (protected refs, destructive git forms, secret
+  exposure) plus two prevented by construction; §14 covers effects outside the checkout that a future
+  `trusted_host` lease would need to grant.
+- **`OperatorOverrideAttestation`** — the interface shape an operator-only override or waiver must
+  attest to (§15.4); not an issuance mechanism itself, which #375/#395 each own.
 
 ## 13. Decisions and open questions
 
@@ -382,6 +422,13 @@ capability negotiation validated through #404 before the old surface is removed.
    ungranted effect) is stated as a requirement on #383's design, not proven, since the lease and the
    `sandboxed` backend it would be checked against (#384) don't exist yet — tracked as open item 5 below,
    not re-opened as settled here.
+10. **Non-bypassable circuit-breaker contract** — six categories (protected-ref write,
+    destructive-remote-operation, irreversible-local-operation, secret-material-exposure,
+    control-plane-state-mutation, repository-deletion), each with a dedicated `ErrorCode` (or an explicit
+    `enforced_today=False` marking construction-level prevention), an `EnforcementHookPoint`, and an
+    `OperatorOverrideAttestation` interface shape (§15). Adversarial proof that these breakers hold under
+    attack is explicitly **not** settled here — tracked as open item 6 below, per #385's own scope
+    disclaiming backend/adversarial proof.
 
 **Genuinely open:**
 1. **Tool-count mechanics for `workspace_exec`** (§9) — gated on #404.
@@ -392,7 +439,8 @@ capability negotiation validated through #404 before the old surface is removed.
    workspace-kind parameter, so today's exact-form allowance is uniform across managed, adopted, and
    attached workspaces alike -- there is no kind that gets a different answer. That is not the same
    question as this item, which is about a *future* authority (an operator-only override, or a
-   `trusted_host`-scoped one) that doesn't exist yet. Still gated on #385/#407.
+   `trusted_host`-scoped one) that doesn't exist yet. §385's dedicated error codes (§15) name the two
+   forms distinctly but do not decide this policy question; still gated on #375/#407.
 4. **Sandboxed network default posture** — default-deny vs. profile-based, for the `sandboxed` backend's
    own container network policy under `sandboxed_turbo` (§4 mode matrix). This is a container-config
    decision #384 makes for the backend itself, distinct from §14's `trusted_host`/`host_effect_scope`
@@ -400,12 +448,16 @@ capability negotiation validated through #404 before the old surface is removed.
    what remains is gated on #384 alone.
 5. **Ambient credentials under `sandboxed_turbo`** — denied outright vs. brokered per profile (§4).
    Gated on #381/#384.
-6. **Backend enforcement proof** — that §6's non-bypassable list and §2's threat classes hold under
-   adversarial testing is #385/#406/#407's job, not something a policy document settles by assertion. §14
-   is the target classification that proof would be run against, not the proof itself.
+6. **Backend enforcement proof** — that §6's non-bypassable list, §15's circuit-breaker contract, and
+   §2's threat classes hold under adversarial testing is #406/#407's job against a real `sandboxed`
+   backend (#384), not something a policy document settles by assertion, and not something #385 itself
+   claims to complete (#385's own scope: "backend implementation and adversarial proof are tracked
+   separately"). §14/§15 are the target classifications that proof would be run against, not the proof
+   itself.
 
-Issues implementing §3, §4, §7, §8, §14 (#371, #383, #384, #385) should cite this document rather than
-re-deriving mode semantics; the open questions above are theirs, or #375/#395/#399/#404's, to close.
+Issues implementing §3, §4, §7, §8, §14, §15 (#371, #383, #384) should cite this document rather than
+re-deriving mode semantics; the open questions above are theirs, or #375/#395/#399/#404/#406/#407's, to
+close.
 
 ## 14. Host-effect matrix (#405): filesystem, process, network, daemon, and package-manager boundaries
 
@@ -488,3 +540,87 @@ command admitted under `governed_relaxed` today reaches the operator's account e
 threat-model assumption 4 and §4's `HOST_ACCOUNT_ACCESS`/`HOST_INHERITED` rows, independent of what 14.2
 labels it. This matrix is the target classification #383's lease design and #385/#406/#407's enforcement
 hooks must conform to; it is not itself a claim that the enforcement exists today.
+
+## 15. Circuit-breaker contract (#385): categories, hook points, dedicated errors, override shape
+
+**Settles §385's contract-design scope** (AC1, AC3, AC5) **and confirms AC2 as already true.** Backend
+implementation and adversarial proof of these breakers under attack stay out of scope here, per #385's
+own text ("Keep the contract backend-neutral; backend implementation and adversarial proof are tracked
+separately") — that is #406/#407's job against the `sandboxed` backend #384 builds, not something this
+contract itself completes. `src/repoforge/domain/circuit_breakers.py` is the implementation; this section
+names the vocabulary other issues should cite.
+
+### 15.1 Circuit-breaker categories and the policy matrix (AC1)
+
+Six categories, each a `CircuitBreakerCategory` member, mirroring §6's non-bypassable list:
+
+| Category | Dedicated error code | Hook point | Enforced today? |
+|---|---|---|---|
+| `PROTECTED_REF_WRITE` | `PROTECTED_REF_WRITE_BLOCKED` | pre-launch | Yes — `domain/policy.py:validate_adopted_branch` |
+| `DESTRUCTIVE_REMOTE_OPERATION` | `DESTRUCTIVE_REMOTE_OPERATION_BLOCKED` | pre-launch | Yes — `domain/adhoc.py:_assert_git_command_allowed` (force/mirror/delete push, malformed `--force-with-lease`) |
+| `IRREVERSIBLE_LOCAL_OPERATION` | `IRREVERSIBLE_LOCAL_OPERATION_BLOCKED` | pre-launch | Yes — same function (history-rewrite subcommands, `--exec`/`-x`, `reflog expire`/`delete`, `update-ref -d`, `clean --force`) |
+| `SECRET_MATERIAL_EXPOSURE` | `CREDENTIAL_LEAK_BLOCKED` (pre-existing, predates #385) | pre-launch | Yes — `adapters/subprocess/command_executor.py`, `adapters/git/transport.py`, `domain/repository_auth_broker.py` |
+| `CONTROL_PLANE_STATE_MUTATION` | `SECURITY_POLICY_VIOLATION` (reserved; no active raise site) | pre-launch | No — prevented by construction: no tool exposes a write path to control-plane state outside its typed write path |
+| `REPOSITORY_DELETION` | `SECURITY_POLICY_VIOLATION` (reserved; no active raise site) | pre-launch | No — prevented by construction: no tool exposes repository deletion at all |
+
+The last two rows are deliberately marked `enforced_today=False` rather than pointed at a raise site
+that doesn't exist — §6 points 4/5 are protected by the tool surface's shape, not by an exception a
+caller can trigger, and the contract says so rather than implying ceremony that isn't there.
+
+Resource-limit dimensions (disk, memory, CPU, socket, mount, symlink, ...) are **not** duplicated into
+this matrix. They stay owned by `EnforcementAssessment` (`domain/execution_environment.py`), which
+#385 extends with the three previously-undeclared dimensions (`socket`, `mount`, `symlink`), each
+defaulting to `UNSUPPORTED` like the pre-existing `cpu`/`memory`/`disk`/`subprocess_count`/
+`network_bytes` — type-level declaration only, no new OS-level enforcement code, matching the precedent
+§13's now-settled item 3 (`#380` AC4) already established for identity fields. Only `timeout`, `output`,
+and `process_cleanup` are truthfully `ENFORCED` on the native backend today; everything else is honestly
+graded `ADVISORY`/`UNSUPPORTED`, never overstated.
+
+### 15.2 Enforcement hook points (AC1): naming an existing convention, not building a new one
+
+`EnforcementHookPoint` (`PRE_LAUNCH` / `RUNTIME` / `POST_EXECUTION`) names the three-phase convention
+every ad-hoc execution call site already follows — `ExecutionCoordinator.prepare()` (pre-launch),
+`CoordinatedExecutionSession.execute()`'s per-command reviewed-argv check (runtime), and `.inspect()`
+(post-execution) (`application/execution/coordinator.py`, invoked in sequence at each call site in
+`application/workspace/run_adhoc.py`). This is deliberately *not* a new hook-registration/plugin
+mechanism: the existing convention already orders enforcement correctly, and #385's AC1 asks the
+contract to define the phases, not to restructure how call sites reach them. Every breaker in 15.1 that
+has an active raise site fires at `PRE_LAUNCH`, because argv-content and protected-ref checks all run
+before any process starts — a future breaker enforcing something only observable while a command is
+running (a resource-limit breach, say) would be the first to actually use `RUNTIME` or
+`POST_EXECUTION`.
+
+### 15.3 Dedicated typed errors (AC3)
+
+Every raise site enforcing a 15.1 category with `enforced_today=True` constructs its error through
+`circuit_breaker_blocked()`, which stamps `circuit_breaker_category` and `enforcement_hook_point` into
+the error's `details` — durable, typed evidence distinguishing *which* breaker fired from a generic
+`SECURITY_POLICY_VIOLATION`/`ADHOC_COMMAND_FORBIDDEN` catch-all. One exception: `SECRET_MATERIAL_EXPOSURE`
+already had its own dedicated code (`CREDENTIAL_LEAK_BLOCKED`) before #385, raised inside a low-level
+subprocess adapter shared by many unrelated callers; routing it through the new helper would mean
+touching that already-hardened shared executor for attribution metadata alone, so its category is marked
+`attributed=False` in the matrix — the dedicated code (AC3's actual requirement) still holds, only the
+`details` payload is unavailable for it. `tests/test_circuit_breaker_conformance.py` asserts every
+`enforced_today=True` category has a distinct code and (where `attributed=True`) the matching `details`.
+
+### 15.4 Operator-only override shape (interface only, not #375/#395's issuance mechanism)
+
+`OperatorOverrideAttestation` is the shape an operator-only override or waiver record must attest to
+justify bypassing one of these controls: `override_id`, `category`, `actor`, `reason`, `granted_at`,
+`expires_at`. This is deliberately an interface/contract only. #385 does not implement issuance,
+storage, or wiring into any raise site — #375 (the protected-ref override authority §6 point 1 names)
+and #395 (the publication-override waiver §6 point 6 names) each own building the actual mechanism that
+must produce a value of this shape, since neither exists yet and guessing their storage or issuance
+needs ahead of that work would risk designing against the wrong constraints. This mirrors how §7 states
+the lease record's shape before #383 builds it.
+
+### 15.5 No dependency cycle (AC5)
+
+Every trigger in `tests/test_circuit_breaker_conformance.py` exercises code that exists today
+(`domain/policy.py`, `domain/adhoc.py`, `adapters/subprocess/command_executor.py`) against the only
+backend that exists today (`native_uncontained`) — nothing here requires `trusted_host` (#383) or
+`sandboxed` (#384) to exist first, and the suite is written so that a second backend would extend the
+same trigger functions rather than requiring a parallel module. AC4 ("host-bypass and sandbox
+implementations can be tested against the same conformance suite") is therefore satisfied by
+construction today, in the only sense provable before #383/#384 exist: there is exactly one backend, and
+the suite runs against it.

@@ -163,6 +163,9 @@ class EnforcementAssessment:
     disk: EnforcementLevel = EnforcementLevel.UNSUPPORTED
     subprocess_count: EnforcementLevel = EnforcementLevel.UNSUPPORTED
     network_bytes: EnforcementLevel = EnforcementLevel.UNSUPPORTED
+    socket: EnforcementLevel = EnforcementLevel.UNSUPPORTED
+    mount: EnforcementLevel = EnforcementLevel.UNSUPPORTED
+    symlink: EnforcementLevel = EnforcementLevel.UNSUPPORTED
 
     def payload(self) -> dict[str, str]:
         return {
@@ -176,6 +179,9 @@ class EnforcementAssessment:
             "disk": self.disk.value,
             "subprocess_count": self.subprocess_count.value,
             "network_bytes": self.network_bytes.value,
+            "socket": self.socket.value,
+            "mount": self.mount.value,
+            "symlink": self.symlink.value,
         }
 
 

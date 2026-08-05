@@ -549,7 +549,7 @@ def test_blocked_git_form_fails_before_execution(tmp_path: Path) -> None:
     workspace_id = env.service.workspace_create("demo", "force push blocked")["workspace_id"]
     with pytest.raises(RepoForgeError) as exc:
         env.service.workspace_run_adhoc(workspace_id, ["git", "push", "--force", "origin", "main"])
-    assert exc.value.code is ErrorCode.ADHOC_COMMAND_FORBIDDEN
+    assert exc.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
     # No audit event is written because the guard rejects before the audited body runs.
     assert _audit_events(env.root, "workspace_run_adhoc") == []
 

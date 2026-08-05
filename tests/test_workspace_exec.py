@@ -343,7 +343,7 @@ def test_declared_effect_does_not_change_which_commands_are_admitted_or_blocked(
                 ("git", "push", "--force", "origin", "main"),
                 declared_effect=declared,
             )
-        assert exc.value.code is ErrorCode.ADHOC_COMMAND_FORBIDDEN
+        assert exc.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
 
 
 def test_blocked_git_form_fails_via_the_durable_path(tmp_path: Path) -> None:
@@ -351,7 +351,7 @@ def test_blocked_git_form_fails_via_the_durable_path(tmp_path: Path) -> None:
     workspace_id = env.service.workspace_create("demo", "force push blocked")["workspace_id"]
     with pytest.raises(RepoForgeError) as exc:
         _exec(env, workspace_id, ("git", "push", "--force", "origin", "main"))
-    assert exc.value.code is ErrorCode.ADHOC_COMMAND_FORBIDDEN
+    assert exc.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
 
 
 def test_mutating_git_command_under_read_only_is_rejected(tmp_path: Path) -> None:

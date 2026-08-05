@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from enum import Enum
 
+from .circuit_breakers import CircuitBreakerCategory, circuit_breaker_blocked
 from .errors import ConfigError, ErrorCode, RepoForgeError
 
 _RUNNER_BASENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -211,57 +212,66 @@ def _has_short_flag(args: tuple[str, ...], letter: str) -> bool:
 
 
 def _assert_git_command_allowed(subcommand: str, rest: tuple[str, ...]) -> EffectClass:
-    """Block irreversible/history-rewriting git forms and classify the rest.
+    """Block irreversible/history-rewriting/destructive-remote git forms and classify the rest.
 
-    Raises :class:`RepoForgeError` (``ADHOC_COMMAND_FORBIDDEN``) on a blocked form. The
+    Raises the dedicated circuit-breaker error (#385) for the category the blocked form
+    falls under -- ``DESTRUCTIVE_REMOTE_OPERATION_BLOCKED`` for force/mirror/delete pushes,
+    ``IRREVERSIBLE_LOCAL_OPERATION_BLOCKED`` for everything else this function blocks. The
     :class:`EffectClass` this returns is the single source of truth both
     :func:`classify_adhoc_command` (coarse, existing exact-state-lock behavior) and
     :func:`classify_adhoc_effect` (full #382 classification) derive from.
     """
 
-    def blocked(reason: str) -> RepoForgeError:
-        return _adhoc_error(
+    def blocked(category: CircuitBreakerCategory, reason: str) -> RepoForgeError:
+        return circuit_breaker_blocked(
+            category,
             f"git {subcommand}: {reason}",
-            ErrorCode.ADHOC_COMMAND_FORBIDDEN,
             safe_next_action=(
                 "This irreversible or history-rewriting form is blocked. Use the reviewed typed "
                 "tools (workspace_push for pushing, workspace_refresh for base integration) or ask "
                 "the operator to perform it directly."
             ),
+            unchanged_state=("The workspace, configuration, and remote state were not modified.",),
         )
 
+    _LOCAL = CircuitBreakerCategory.IRREVERSIBLE_LOCAL_OPERATION
+    _REMOTE = CircuitBreakerCategory.DESTRUCTIVE_REMOTE_OPERATION
+
     if subcommand in _GIT_BLOCKED_SUBCOMMANDS:
-        raise blocked("history rewriting is not permitted through the ad-hoc runner")
+        raise blocked(_LOCAL, "history rewriting is not permitted through the ad-hoc runner")
     # Arbitrary command execution via --exec/-x (rebase, push receive-pack, etc.).
     if any(token == "--exec" or token.startswith("--exec=") for token in rest):
-        raise blocked("--exec runs arbitrary commands and is not permitted")
+        raise blocked(_LOCAL, "--exec runs arbitrary commands and is not permitted")
     if subcommand == "rebase" and "-x" in rest:
-        raise blocked("rebase -x runs arbitrary commands and is not permitted")
+        raise blocked(_LOCAL, "rebase -x runs arbitrary commands and is not permitted")
     if subcommand == "push":
         if any(
             token in {"--force", "-f", "--force-if-includes", "--mirror", "--delete", "-d"}
             for token in rest
         ):
             raise blocked(
+                _REMOTE,
                 "force, mirror, and delete pushes are not permitted; only "
-                "--force-with-lease=<ref>:<sha> is allowed"
+                "--force-with-lease=<ref>:<sha> is allowed",
             )
         for token in rest:
             if token == "--force-with-lease":
                 raise blocked(
+                    _REMOTE,
                     "bare --force-with-lease is not exact-state bound; use "
-                    "--force-with-lease=<ref>:<sha>"
+                    "--force-with-lease=<ref>:<sha>",
                 )
             if token.startswith("--force-with-lease=") and not _FORCE_WITH_LEASE_EXACT.match(token):
                 raise blocked(
-                    "--force-with-lease must be the exact --force-with-lease=<ref>:<sha> form"
+                    _REMOTE,
+                    "--force-with-lease must be the exact --force-with-lease=<ref>:<sha> form",
                 )
     if subcommand == "reflog" and any(token in {"expire", "delete"} for token in rest):
-        raise blocked("reflog expire/delete destroys recovery history and is not permitted")
+        raise blocked(_LOCAL, "reflog expire/delete destroys recovery history and is not permitted")
     if subcommand == "update-ref" and any(token in {"-d", "--delete"} for token in rest):
-        raise blocked("update-ref delete removes refs directly and is not permitted")
+        raise blocked(_LOCAL, "update-ref delete removes refs directly and is not permitted")
     if subcommand == "clean" and ("--force" in rest or _has_short_flag(rest, "f")):
-        raise blocked("git clean --force irreversibly deletes untracked files")
+        raise blocked(_LOCAL, "git clean --force irreversibly deletes untracked files")
 
     if subcommand in _GIT_PURE_LOCAL_READ_SUBCOMMANDS:
         return EffectClass.READ_ONLY
