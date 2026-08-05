@@ -262,6 +262,90 @@ def test_read_only_git_command_runs_and_is_classified(tmp_path: Path) -> None:
     assert evidence["read_only_violation"] is False
 
 
+def test_git_fetch_reports_credentialed_network_effect_and_default_mismatch(
+    tmp_path: Path,
+) -> None:
+    """#382 AC1/AC2: fetch stays CommandClass.READ_ONLY (unchanged exact-state-lock
+    behavior) but its EffectClass is credentialed_network, not read_only -- and under
+    the default declared_effect (derived from mutability='read_only'), that is a
+    mismatch worth reporting, not a silent match."""
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "git fetch")["workspace_id"]
+    result = _exec(env, workspace_id, ("git", "fetch", "origin"))
+    assert result["commands"][0]["returncode"] == 0
+    evidence = result["adhoc_evidence"]
+    assert evidence["command_class"] == "read_only"
+    assert evidence["declared_effect"] == "read_only"
+    assert evidence["observed_effect"] == "credentialed_network"
+    assert evidence["effect_mismatch"] is True
+
+
+def test_declaring_credentialed_network_for_fetch_clears_the_mismatch_flag(
+    tmp_path: Path,
+) -> None:
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "git fetch declared")["workspace_id"]
+    result = _exec(
+        env, workspace_id, ("git", "fetch", "origin"), declared_effect="credentialed_network"
+    )
+    evidence = result["adhoc_evidence"]
+    assert evidence["declared_effect"] == "credentialed_network"
+    assert evidence["observed_effect"] == "credentialed_network"
+    assert evidence["effect_mismatch"] is False
+
+
+def test_git_push_reports_remote_write_effect_and_mismatch_under_workspace_declaration(
+    tmp_path: Path,
+) -> None:
+    """#382 AC2: a plain mutability='workspace' declaration (EffectClass.WORKSPACE by
+    default) does not cover a command that actually reaches a remote -- push must still
+    surface as a mismatch unless the caller declares remote_write (or broader)."""
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "git push declared workspace")[
+        "workspace_id"
+    ]
+    env_source_head = env.service.workspace_status(workspace_id)
+    result = _exec(
+        env,
+        workspace_id,
+        ("git", "push", "origin", "HEAD:refs/heads/ai/exec-push-test"),
+        mutability="workspace",
+        expected_head_sha=env_source_head["head_sha"],
+        expected_fingerprint=env_source_head["workspace_fingerprint"],
+    )
+    evidence = result["adhoc_evidence"]
+    assert evidence["declared_effect"] == "workspace"
+    assert evidence["observed_effect"] == "remote_write"
+    assert evidence["effect_mismatch"] is True
+
+
+def test_declared_effect_does_not_change_which_commands_are_admitted_or_blocked(
+    tmp_path: Path,
+) -> None:
+    """#382 AC4, end to end: the same argv is admitted or blocked identically regardless
+    of declared_effect. Declaring destructive_remote for git status does not gate it
+    behind anything new, and declaring read_only for a blocked force-push does not let
+    it through -- declared_effect is reporting, never authorization."""
+    env = _relaxed_env(tmp_path, runners=("git",))
+    allowed_id = env.service.workspace_create("demo", "status any declared effect")["workspace_id"]
+    for declared in ("read_only", "destructive_remote"):
+        result = _exec(
+            env, allowed_id, ("git", "status", "--porcelain=v2"), declared_effect=declared
+        )
+        assert result["commands"][0]["returncode"] == 0
+
+    blocked_id = env.service.workspace_create("demo", "blocked any declared effect")["workspace_id"]
+    for declared in ("read_only", "destructive_remote"):
+        with pytest.raises(RepoForgeError) as exc:
+            _exec(
+                env,
+                blocked_id,
+                ("git", "push", "--force", "origin", "main"),
+                declared_effect=declared,
+            )
+        assert exc.value.code is ErrorCode.ADHOC_COMMAND_FORBIDDEN
+
+
 def test_blocked_git_form_fails_via_the_durable_path(tmp_path: Path) -> None:
     env = _relaxed_env(tmp_path, runners=("git",))
     workspace_id = env.service.workspace_create("demo", "force push blocked")["workspace_id"]

@@ -51,7 +51,7 @@ _ADHOC_REQUEST_FIELDS = frozenset(
 #: queued by an earlier release survives the activation that adds them. The decoder
 #: stays exact about unknown fields; it is only tolerant about these missing ones.
 _OPTIONAL_REQUEST_FIELDS: dict[str, frozenset[str]] = {
-    "adhoc": frozenset({"stdin_text", "script", "shell", "argv_sequence"})
+    "adhoc": frozenset({"stdin_text", "script", "shell", "argv_sequence", "declared_effect"})
 }
 _DIAGNOSTIC_REQUEST_FIELDS = frozenset(
     {
@@ -102,6 +102,10 @@ class OperationWorkRequest:
     force_rerun: bool = False
     rerun_failed: bool = False
     stdin_text: str | None = None
+    #: The caller's stated effect intent (#382); None means "derive from mutability" --
+    #: see domain.adhoc.EffectClass. Never itself an authorization: no admission check
+    #: consults it, only the effect-mismatch evidence comparison does.
+    declared_effect: str | None = None
 
     def __post_init__(self) -> None:
         """Durable state is the execution authority after crash/retry -- it must not
@@ -211,6 +215,7 @@ class OperationWorkRequest:
         expected_fingerprint: str,
         config_generation: int,
         stdin_text: str | None = None,
+        declared_effect: str | None = None,
     ) -> Self:
         return cls(
             kind="adhoc",
@@ -222,6 +227,7 @@ class OperationWorkRequest:
             working_directory=working_directory,
             mutability=mutability,
             stdin_text=stdin_text,
+            declared_effect=declared_effect,
             expected_head_sha=expected_head_sha,
             expected_fingerprint=expected_fingerprint,
             config_generation=config_generation,
@@ -397,6 +403,7 @@ def work_item_payload(item: OperationWorkItem) -> dict[str, object]:
             "working_directory": request.working_directory,
             "mutability": request.mutability,
             "stdin_text": request.stdin_text,
+            "declared_effect": request.declared_effect,
             "expected_head_sha": request.expected_head_sha,
             "expected_fingerprint": request.expected_fingerprint,
             "config_generation": request.config_generation,
@@ -525,6 +532,11 @@ def work_item_from_payload(payload: dict[str, object]) -> OperationWorkItem:
                 None
                 if request_payload.get("stdin_text") is None
                 else str(request_payload["stdin_text"])
+            ),
+            declared_effect=(
+                None
+                if request_payload.get("declared_effect") is None
+                else str(request_payload["declared_effect"])
             ),
             expected_head_sha=str(request_payload["expected_head_sha"]),
             expected_fingerprint=str(request_payload["expected_fingerprint"]),

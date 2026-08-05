@@ -40,13 +40,18 @@ _WAIT_SAFE_NEXT_ACTION = (
 
 def _adhoc_sequence_evidence(result: WorkspaceRunAdhocSequenceResult) -> dict[str, object]:
     """Project a sequence's (#443) policy facts onto the same AdhocEvidence shape a
-    single command uses. `command_class` has no single value across a sequence's
-    (possibly mixed) elements, so it is always null here; `content_inspected` is true
-    only when every element was git and actually inspected -- see
+    single command uses. `command_class`/`observed_effect` have no single value across a
+    sequence's (possibly mixed) elements, so they are always null here (#382);
+    `effect_mismatch` is still meaningful as an aggregate -- see
+    WorkspaceRunAdhocSequenceResult.effect_mismatch. `content_inspected` is true only when
+    every element was git and actually inspected -- see
     WorkspaceRunAdhocSequenceResult.all_content_inspected."""
     return {
         "mutability": result.mutability,
         "command_class": None,
+        "declared_effect": result.declared_effect,
+        "observed_effect": None,
+        "effect_mismatch": result.effect_mismatch,
         "content_inspected": result.all_content_inspected,
         "fingerprint_changed": result.fingerprint_changed,
         "read_only_violation": result.read_only_violation,
@@ -72,6 +77,7 @@ class WorkspaceExecCommand:
     expected_fingerprint: str | None = None
     expected_head_sha: str | None = None
     mutability: str = "read_only"
+    declared_effect: str | None = None
     background: bool = False
 
 
@@ -153,6 +159,7 @@ class WorkspaceExecutor:
                 expected_fingerprint=workspace_fingerprint,
                 config_generation=self.ctx.config_generation,
                 stdin_text=command.stdin_text,
+                declared_effect=command.declared_effect,
             ),
             operation_kind="workspace_run_adhoc",
         )

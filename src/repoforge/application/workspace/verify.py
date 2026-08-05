@@ -331,6 +331,9 @@ def _adhoc_evidence(result: WorkspaceRunAdhocResult) -> dict[str, object]:
     return {
         "mutability": result.mutability,
         "command_class": result.command_class,
+        "declared_effect": result.declared_effect,
+        "observed_effect": result.effect_class,
+        "effect_mismatch": result.effect_mismatch,
         "content_inspected": result.command_class is not None,
         "fingerprint_changed": result.fingerprint_changed,
         "read_only_violation": result.read_only_violation,

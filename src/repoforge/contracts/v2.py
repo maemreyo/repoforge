@@ -11,6 +11,7 @@ from pydantic import Field, model_validator
 
 # Re-exported, not redefined: `application` needs the same names and does not depend on
 # the contract layer, so the single declaration lives in `domain`.
+from ..domain.adhoc import EffectClass
 from ..domain.context_sections import DEFAULT_CONTEXT_SECTIONS, ContextSectionName
 from .common import (
     AuthSelectionInput,
@@ -1628,6 +1629,31 @@ class AdhocEvidence(StrictModel):
 
     mutability: Literal["read_only", "workspace"]
     command_class: Literal["read_only", "mutating"] | None = None
+    declared_effect: EffectClass = Field(
+        description=(
+            "The caller's stated intent (#382), defaulted from mutability when the caller "
+            "did not set declared_effect explicitly. Not an authorization -- see "
+            "WorkspaceExecInput.declared_effect."
+        )
+    )
+    observed_effect: EffectClass | None = Field(
+        default=None,
+        description=(
+            "The effect content-inspection actually found for a git command (#382); null "
+            "for every other runner, whose content RepoForge does not inspect -- exactly "
+            "the same opacity command_class/content_inspected already report."
+        ),
+    )
+    effect_mismatch: bool = Field(
+        description=(
+            "True when observed_effect is more consequential than declared_effect (#382) -- "
+            "e.g. a command declared read_only that actually reached the network with "
+            "credentials, or one declared workspace that actually wrote to a remote. "
+            "Always false when observed_effect is null: an opaque runner's effect is "
+            "whatever the caller declared, by construction, so there is nothing to compare "
+            "against."
+        )
+    )
     content_inspected: bool
     fingerprint_changed: bool
     read_only_violation: bool = Field(
@@ -1782,6 +1808,19 @@ class WorkspaceExecInput(StrictModel):
         ),
     )
     background: bool = False
+    declared_effect: EffectClass | None = Field(
+        default=None,
+        description=(
+            "The caller's stated intent, one of read_only, workspace, local_history, "
+            "credentialed_network, remote_write, or destructive_remote (#382), from least "
+            "to most consequential. Defaults from mutability when omitted: read_only, or "
+            "workspace. This is never itself an authorization -- it never widens what "
+            "adhoc_runners/git content-inspection would otherwise permit, and no admission "
+            "check consults it, so declaring a broader effect than a command turns out to "
+            "need cannot self-upgrade what actually runs. Compared against the "
+            "independently observed effect to produce effect_mismatch evidence."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_command_form(self) -> WorkspaceExecInput:

@@ -609,6 +609,7 @@ _WORK_REQUEST_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
             "working_directory",
             "mutability",
             "stdin_text",
+            "declared_effect",
         }
     ),
     "diagnostic": frozenset(
@@ -657,6 +658,7 @@ def _operation_work_item(kind: str) -> Callable[[Path], tuple[object, object]]:
                 "working_directory": "src",
                 "mutability": "workspace_write",
                 "stdin_text": "--- a/x\n+++ b/x\n",
+                "declared_effect": "local_history",
             },
             "diagnostic": {
                 "diagnostic_id": "diag-1",

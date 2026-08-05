@@ -23,8 +23,11 @@ from pathlib import Path
 
 from ...domain.adhoc import (
     CommandClass,
+    EffectClass,
     ExecutionMode,
-    classify_adhoc_command,
+    classify_adhoc_effect,
+    effect_exceeds_declaration,
+    effect_to_command_class,
     validate_adhoc_argv,
     validate_adhoc_script,
     validate_adhoc_sequence,
@@ -104,6 +107,7 @@ class WorkspaceRunAdhocCommand:
     expected_head_sha: str | None = None
     mutability: str = "read_only"
     stdin_text: str | None = None
+    declared_effect: str | None = None
     cancellation_token: CancellationToken | None = None
 
 
@@ -128,6 +132,9 @@ class WorkspaceRunAdhocResult:
     head_sha_before: str
     mutability: str
     command_class: str | None
+    declared_effect: str
+    effect_class: str | None
+    effect_mismatch: bool
     read_only_violation: bool
     network_policy: str
     evidence_only: bool
@@ -165,6 +172,7 @@ class WorkspaceRunAdhocSequenceCommand:
     expected_fingerprint: str | None = None
     expected_head_sha: str | None = None
     mutability: str = "read_only"
+    declared_effect: str | None = None
     cancellation_token: CancellationToken | None = None
 
 
@@ -185,6 +193,12 @@ class WorkspaceRunAdhocSequenceResult:
     head_sha: str
     head_sha_before: str
     mutability: str
+    declared_effect: str
+    #: True when any element's observed effect exceeded declared_effect (#382). There is
+    #: no single "observed_effect" field here, mirroring all_content_inspected below: a
+    #: sequence's elements may have heterogeneous effects, so only the aggregate
+    #: mismatch/inspection facts are reported, not one value that would misrepresent them.
+    effect_mismatch: bool
     read_only_violation: bool
     #: True only when every element was a git command classify_adhoc_command actually
     #: inspected -- the weakest link decides: one opaque (non-git) element makes the
@@ -207,6 +221,17 @@ _GATE_GUIDANCE = (
     "Run an enrolled verification profile (workspace_verify / workspace_run_profile) on the exact "
     "tree immediately before workspace_commit."
 )
+
+
+def _resolve_declared_effect(declared_effect: str | None, mutability: str) -> EffectClass:
+    """The caller's stated intent (#382), defaulted from mutability when omitted.
+
+    This default is itself never an authorization -- see EffectClass's own docstring --
+    it only sets the baseline effect_mismatch is compared against.
+    """
+    if declared_effect is not None:
+        return EffectClass(declared_effect)
+    return EffectClass.WORKSPACE if mutability == "workspace" else EffectClass.READ_ONLY
 
 
 _MAX_ADHOC_TIMEOUT_SECONDS = 3_600
@@ -372,11 +397,11 @@ class WorkspaceAdhocRunner:
             shell = validate_adhoc_shell_runner(c.shell or "", repo.adhoc_shell_runners)
             script = validate_adhoc_script(c.script)
             argv = (shell, "-c", script)
-            # A script body is never content-inspected: classify_adhoc_command only
+            # A script body is never content-inspected: classify_adhoc_effect only
             # inspects when argv[0] == "git" literally, so this is opaque exactly like
             # every non-git argv runner already is -- not a new gap (see
             # validate_adhoc_shell_runner).
-            command_class = None
+            effect_class = None
         else:
             if c.argv is None:
                 raise _adhoc_error(
@@ -386,9 +411,13 @@ class WorkspaceAdhocRunner:
             argv = validate_adhoc_argv(c.argv, repo.adhoc_runners)
             # Content-inspect the exact argv: blocks irreversible/history-rewriting git
             # forms (raising ADHOC_COMMAND_FORBIDDEN before any process starts) and infers
-            # whether a git command is read-only or mutating. Non-git runners return None
-            # (opaque).
-            command_class = classify_adhoc_command(argv)
+            # the git command's effect (#382). Non-git runners return None (opaque).
+            effect_class = classify_adhoc_effect(argv)
+        command_class = None if effect_class is None else effect_to_command_class(effect_class)
+        declared_effect = _resolve_declared_effect(c.declared_effect, c.mutability)
+        effect_mismatch = effect_class is not None and effect_exceeds_declaration(
+            effect_class, declared_effect
+        )
         stdin_text = validate_adhoc_stdin(c.stdin_text)
         declared_mutating = c.mutability == "workspace"
         effective_mutating = declared_mutating or command_class is CommandClass.MUTATING
@@ -426,6 +455,9 @@ class WorkspaceAdhocRunner:
             "expected_head_sha": c.expected_head_sha,
             "mutability": c.mutability,
             "command_class": command_class.value if command_class is not None else None,
+            "declared_effect": declared_effect.value,
+            "effect_class": effect_class.value if effect_class is not None else None,
+            "effect_mismatch": effect_mismatch,
             # Length only. Standard input is caller-supplied content that may carry a
             # patch, a token, or anything else, and the audit log is not the place for it.
             "stdin_length": len(stdin_text) if stdin_text is not None else 0,
@@ -618,6 +650,9 @@ class WorkspaceAdhocRunner:
                     head_sha_before=head_before,
                     mutability=c.mutability,
                     command_class=command_class.value if command_class is not None else None,
+                    declared_effect=declared_effect.value,
+                    effect_class=effect_class.value if effect_class is not None else None,
+                    effect_mismatch=effect_mismatch,
                     read_only_violation=read_only_violation,
                     network_policy=_NETWORK_POLICY_LABEL,
                     evidence_only=True,
@@ -658,7 +693,16 @@ class WorkspaceAdhocRunner:
                 ErrorCode.ADHOC_ARGV_INVALID,
             )
         validated = validate_adhoc_sequence(c.argv_sequence, repo.adhoc_runners)
-        command_classes = [classify_adhoc_command(argv) for argv in validated]
+        effect_classes = [classify_adhoc_effect(argv) for argv in validated]
+        command_classes = [
+            None if effect is None else effect_to_command_class(effect) for effect in effect_classes
+        ]
+        declared_effect = _resolve_declared_effect(c.declared_effect, c.mutability)
+        sequence_effect_mismatch = any(
+            effect_exceeds_declaration(effect, declared_effect)
+            for effect in effect_classes
+            if effect is not None
+        )
         declared_mutating = c.mutability == "workspace"
         any_mutating_class = any(cls is CommandClass.MUTATING for cls in command_classes)
         effective_mutating = declared_mutating or any_mutating_class
@@ -693,6 +737,8 @@ class WorkspaceAdhocRunner:
             "expected_fingerprint": c.expected_fingerprint,
             "expected_head_sha": c.expected_head_sha,
             "mutability": c.mutability,
+            "declared_effect": declared_effect.value,
+            "effect_mismatch": sequence_effect_mismatch,
         }
 
         def run_body() -> WorkspaceRunAdhocSequenceResult:
@@ -877,6 +923,8 @@ class WorkspaceAdhocRunner:
                     head_sha=self.ctx.git.head_sha(locked_workspace),
                     head_sha_before=head_before,
                     mutability=c.mutability,
+                    declared_effect=declared_effect.value,
+                    effect_mismatch=sequence_effect_mismatch,
                     read_only_violation=read_only_violation,
                     all_content_inspected=all(cls is not None for cls in command_classes),
                     network_policy=_NETWORK_POLICY_LABEL,

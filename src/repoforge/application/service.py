@@ -1688,6 +1688,7 @@ class CodingService:
         expected_fingerprint: str | None = None,
         expected_head_sha: str | None = None,
         mutability: str = "read_only",
+        declared_effect: str | None = None,
         background: bool = False,
     ) -> dict[str, Any]:
         return _result(
@@ -1703,6 +1704,7 @@ class CodingService:
                     expected_fingerprint=expected_fingerprint,
                     expected_head_sha=expected_head_sha,
                     mutability=mutability,
+                    declared_effect=declared_effect,
                     background=background,
                 )
             )
