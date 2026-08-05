@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from repoforge.config import DEFAULT_ALLOWED_ENVIRONMENT
 from repoforge.domain.credential_profiles import (
     MAX_CREDENTIAL_PROFILES,
     available_credential_profiles,
@@ -12,6 +13,14 @@ from repoforge.domain.credential_profiles import (
     validate_credential_profiles,
 )
 from repoforge.domain.errors import ConfigError
+
+
+def test_ssh_credentials_are_not_in_the_unconditional_environment_baseline() -> None:
+    """#407: these moved to the opt-in git_ssh profile, closing the gap where ad-hoc
+    execution could push over SSH with the operator's real agent identity by default."""
+    assert "SSH_AUTH_SOCK" not in DEFAULT_ALLOWED_ENVIRONMENT
+    assert "GIT_SSH_COMMAND" not in DEFAULT_ALLOWED_ENVIRONMENT
+    assert "GH_HOST" in DEFAULT_ALLOWED_ENVIRONMENT  # names a host, not a credential
 
 
 def test_available_credential_profiles_is_a_stable_nonempty_catalog() -> None:
@@ -39,6 +48,23 @@ def test_validate_credential_profiles_rejects_too_many() -> None:
     too_many = tuple(available_credential_profiles()[0] for _ in range(MAX_CREDENTIAL_PROFILES + 1))
     with pytest.raises(ConfigError, match="must not exceed"):
         validate_credential_profiles(too_many, "demo")
+
+
+def test_git_ssh_and_github_profiles_are_available() -> None:
+    """#407: SSH_AUTH_SOCK/GIT_SSH_COMMAND moved out of the unconditional
+    DEFAULT_ALLOWED_ENVIRONMENT baseline into the opt-in git_ssh profile, and github
+    grants GH_TOKEN/GITHUB_TOKEN as the explicit opt-in for gh remote-write reach."""
+    profiles = available_credential_profiles()
+    assert "git_ssh" in profiles
+    assert "github" in profiles
+    assert set(resolve_credential_profile_env_names(("git_ssh",))) == {
+        "SSH_AUTH_SOCK",
+        "GIT_SSH_COMMAND",
+    }
+    assert set(resolve_credential_profile_env_names(("github",))) == {
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+    }
 
 
 def test_resolve_credential_profile_env_names_unions_and_dedupes() -> None:

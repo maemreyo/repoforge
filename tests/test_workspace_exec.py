@@ -511,7 +511,8 @@ def test_exec_with_no_stdin_text_gets_immediate_eof_not_a_hang(tmp_path: Path) -
 # ---------------------------------------------------------------------------
 # Reviewed shell-script execution (#377): mutually exclusive with argv and
 # argv_sequence, gated behind a separate, empty-by-default adhoc_shell_runners
-# allowlist, and never content-inspected for git forms.
+# allowlist. Not authoritatively content-inspected for git forms the way argv is,
+# though #407 layers a best-effort scan on top (see test_workspace_adhoc.py).
 # ---------------------------------------------------------------------------
 
 
@@ -608,19 +609,32 @@ def test_script_form_is_never_content_inspected(tmp_path: Path) -> None:
     assert result["adhoc_evidence"]["content_inspected"] is False
 
 
-def test_script_form_is_not_blocked_by_git_content_inspection(tmp_path: Path) -> None:
-    """A form classify_adhoc_command would refuse via the argv path (git clean --force
-    is explicitly blocked, see domain/adhoc.py) is NOT structurally blocked when run
-    through a script body -- documented, expected behavior (review finding), not a new
-    gap: an operator who enables adhoc_shell_runners has already accepted this, the same
-    trust decision as allowlisting a shell interpreter in adhoc_runners would be."""
+def test_script_form_catches_a_straightforward_blocked_git_command(tmp_path: Path) -> None:
+    """#407: a blocked git form copy-pasted directly into a script body is now caught by
+    scan_script_for_blocked_git_forms's best-effort scan, raising the same dedicated
+    circuit-breaker code the equivalent argv form would (domain/adhoc.py). This is the
+    gap #407 closes, superseding the earlier "not structurally blocked" behavior."""
     env = _relaxed_shell_env(tmp_path, runners=("git",))
     workspace_id = env.service.workspace_create("demo", "script git clean force")["workspace_id"]
 
-    result = _exec_script(env, workspace_id, "git clean --force", "sh")
+    with pytest.raises(RepoForgeError) as exc:
+        _exec_script(env, workspace_id, "git clean --force", "sh")
+    assert exc.value.code is ErrorCode.IRREVERSIBLE_LOCAL_OPERATION_BLOCKED
 
-    # Not ADHOC_COMMAND_FORBIDDEN: the script form has no visibility into what the shell
-    # actually ran, so it cannot raise the argv-only content-inspection error at all.
+
+def test_script_form_scan_is_best_effort_not_a_shell_parser(tmp_path: Path) -> None:
+    """The scan is a heuristic token scan over the literal script text, not a shell
+    parser or interpreter (#407's own documented limit): a flag assembled through shell
+    variable substitution never appears as a literal "--force" token, so it evades the
+    scan exactly as domain/adhoc.py's docstrings say it can. This is the honest
+    boundary, not a claim the scan defeats every obfuscation."""
+    env = _relaxed_shell_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "script obfuscated git clean force")[
+        "workspace_id"
+    ]
+
+    result = _exec_script(env, workspace_id, 'FLAG="--force"; git clean "$FLAG"', "sh")
+
     assert result["outcome"] in {"passed", "failed"}
 
 

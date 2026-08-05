@@ -10,6 +10,7 @@ for the exact-tree fingerprint gate this must never influence.
 from __future__ import annotations
 
 import re
+import shlex
 from enum import Enum
 
 from .circuit_breakers import CircuitBreakerCategory, circuit_breaker_blocked
@@ -266,6 +267,15 @@ def _assert_git_command_allowed(subcommand: str, rest: tuple[str, ...]) -> Effec
                     _REMOTE,
                     "--force-with-lease must be the exact --force-with-lease=<ref>:<sha> form",
                 )
+            # `git push origin :branch` deletes the remote ref via an empty-source
+            # refspec -- the same effect as `--delete`, without the flag the check above
+            # scans for (#407).
+            if token.startswith(":") and len(token) > 1:
+                raise blocked(
+                    _REMOTE,
+                    "an empty-source refspec (`:<ref>`) deletes the remote ref and is not "
+                    "permitted; only --force-with-lease=<ref>:<sha> is allowed",
+                )
     if subcommand == "reflog" and any(token in {"expire", "delete"} for token in rest):
         raise blocked(_LOCAL, "reflog expire/delete destroys recovery history and is not permitted")
     if subcommand == "update-ref" and any(token in {"-d", "--delete"} for token in rest):
@@ -294,6 +304,37 @@ def _assert_git_command_allowed(subcommand: str, rest: tuple[str, ...]) -> Effec
             else EffectClass.READ_ONLY
         )
     return EffectClass.LOCAL_HISTORY
+
+
+def extract_push_destination_refs(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """Best-effort destination branch name(s) an explicit ``git push`` refspec targets
+    (#407's protected-ref check in ``application/workspace/run_adhoc.py``).
+
+    Deliberately repository-config-independent -- this only reads what the argv asks to
+    write to; the caller decides what counts as protected. Returns nothing for anything
+    that is not a ``git push`` with an explicit refspec: a non-``git`` argv, a ``git``
+    subcommand other than ``push``, or ``git push``/``git push <remote>`` with no
+    refspec at all -- that implicit destination is the workspace's own current branch,
+    which cannot already be a protected branch (workspace creation/attach already reject
+    that), so there is nothing new to check.
+    """
+    if not argv or argv[0] != "git":
+        return ()
+    subcommand, rest = _git_subcommand(tuple(argv[1:]))
+    if subcommand != "push":
+        return ()
+    positionals = [token for token in rest if not token.startswith("-")]
+    if len(positionals) < 2:
+        return ()
+    destinations: list[str] = []
+    for refspec in positionals[1:]:
+        candidate = refspec[1:] if refspec.startswith("+") else refspec
+        _, _, dest = candidate.partition(":")
+        dest = dest or candidate
+        if dest.startswith("refs/heads/"):
+            dest = dest[len("refs/heads/") :]
+        destinations.append(dest)
+    return tuple(destinations)
 
 
 def effect_to_command_class(effect: EffectClass) -> CommandClass:
@@ -406,7 +447,11 @@ def validate_adhoc_shell_runner(shell: str, runners: tuple[str, ...]) -> str:
     this is the same trust decision as allowlisting a shell interpreter in
     ``adhoc_runners`` already is. ``classify_adhoc_command`` only content-inspects when
     argv[0] == "git" literally, so a script body was never structurally protected from
-    reaching git either way -- this does not remove a safety guarantee that existed.
+    reaching git through argv-level classification alone -- this does not remove a
+    safety guarantee that existed. #407 adds a best-effort, non-authoritative content
+    scan on top (:func:`scan_script_for_blocked_git_forms`), which is not a shell parser
+    and can be evaded by a sufficiently obfuscated script; it closes the straightforward
+    case (a blocked git command copy-pasted directly into a script body), not every case.
     """
     if not runners:
         raise _adhoc_error(
@@ -446,8 +491,9 @@ def validate_adhoc_script(script: str) -> str:
     """Validate one reviewed shell-script body (#377).
 
     Bounded like stdin content, not like an argv element: newlines are the whole point.
-    Unlike argv, this is never content-inspected for git forms -- see
-    :func:`validate_adhoc_shell_runner`.
+    Unlike argv, this is not authoritatively content-inspected for git forms -- see
+    :func:`validate_adhoc_shell_runner` and :func:`scan_script_for_blocked_git_forms`
+    (#407) for the best-effort scan layered on top.
     """
     if not isinstance(script, str):
         raise _adhoc_error(
@@ -478,6 +524,54 @@ def validate_adhoc_script(script: str) -> str:
             safe_next_action="Remove the NUL byte; a shell script cannot contain one.",
         )
     return script
+
+
+_SCRIPT_COMMAND_SEPARATORS = frozenset({";", "&&", "||", "|", "&"})
+_SCRIPT_SEPARATOR_SPLIT = re.compile(r"(;|&&|\|\||\||&)")
+
+
+def extract_git_argv_segments(script: str) -> tuple[tuple[str, ...], ...]:
+    """Best-effort split of a shell-script body into git-prefixed command segments (#407).
+
+    Not a shell parser: a heuristic token scan using :mod:`shlex` plus a manual split on
+    the common command-separator characters shlex itself does not treat specially. It
+    reliably catches a straightforward, non-obfuscated invocation copy-pasted into a
+    script body (the case #407 asks to cover); it does not catch one built from string
+    concatenation, base64, command substitution, or a nested interpreter -- the same
+    acknowledged limit already documented for generic shell content in general (§8 of
+    ``docs/architecture/autonomy-policy-model.md``). Returns each segment unvalidated, as
+    ``("git", ...)`` -- callers classify or block it themselves (see
+    :func:`scan_script_for_blocked_git_forms`).
+    """
+    try:
+        raw_tokens = shlex.split(script, comments=True)
+    except ValueError:
+        # Unbalanced quotes or a trailing escape -- the shell itself will reject this at
+        # runtime; scanning malformed shell syntax for a git form is not reliable.
+        return ()
+    flat: list[str] = []
+    for token in raw_tokens:
+        flat.extend(piece for piece in _SCRIPT_SEPARATOR_SPLIT.split(token) if piece)
+    segments: list[list[str]] = [[]]
+    for token in flat:
+        if token in _SCRIPT_COMMAND_SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return tuple(tuple(segment) for segment in segments if segment and segment[0] == "git")
+
+
+def scan_script_for_blocked_git_forms(script: str) -> None:
+    """Best-effort, defense-in-depth scan for a blocked git form inside a shell-script
+    body (#407) -- raises the same dedicated circuit-breaker error
+    :func:`_assert_git_command_allowed` raises for the equivalent argv form. See
+    :func:`extract_git_argv_segments` for what this can and cannot catch.
+    """
+    for segment in extract_git_argv_segments(script):
+        subcommand, rest = _git_subcommand(segment[1:])
+        if subcommand is None:
+            continue
+        _assert_git_command_allowed(subcommand, rest)
 
 
 def validate_adhoc_sequence(
@@ -619,6 +713,9 @@ __all__ = [
     "classify_adhoc_effect",
     "effect_exceeds_declaration",
     "effect_to_command_class",
+    "extract_git_argv_segments",
+    "extract_push_destination_refs",
+    "scan_script_for_blocked_git_forms",
     "validate_adhoc_argv",
     "validate_adhoc_runners",
     "validate_adhoc_script",

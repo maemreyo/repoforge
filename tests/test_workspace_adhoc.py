@@ -373,6 +373,72 @@ def test_relaxed_repo_runs_allowlisted_command_as_evidence_only(tmp_path: Path) 
     assert result.get("gate_guidance")
 
 
+def test_gh_config_dir_is_scrubbed_by_default(tmp_path: Path) -> None:
+    """#407: an ad-hoc run must not silently reach the operator's real on-disk gh OAuth
+    token via ambient HOME/$HOME/.config/gh -- GH_CONFIG_DIR is pointed at an empty,
+    never-created scratch path under the workspace by default."""
+    env = _relaxed_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "gh config dir scrubbed")["workspace_id"]
+
+    result = env.service.workspace_run_adhoc(
+        workspace_id,
+        ["python3", "-c", "import os; print(os.environ.get('GH_CONFIG_DIR', 'MISSING'))"],
+    )
+
+    assert result["returncode"] == 0
+    reported = result["stdout"].strip()
+    assert reported != "MISSING"
+    assert reported.endswith(".repoforge-empty-gh-config")
+
+
+_PRINT_SSH_AUTH_SOCK = [
+    "python3",
+    "-c",
+    "import os; print('SSH_AUTH_SOCK=' + os.environ.get('SSH_AUTH_SOCK', 'MISSING'))",
+]
+
+
+def test_ssh_auth_sock_absent_from_ad_hoc_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#407: SSH_AUTH_SOCK is no longer part of the unconditional environment baseline
+    -- a repository not enrolled in git_ssh must not see the operator's real SSH agent,
+    even though the host process genuinely has it set."""
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/real-agent.sock")
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("python3",),
+    )
+    workspace_id = env.service.workspace_create("demo", "no ssh by default")["workspace_id"]
+
+    result = env.service.workspace_run_adhoc(workspace_id, _PRINT_SSH_AUTH_SOCK)
+
+    assert result["returncode"] == 0
+    assert "SSH_AUTH_SOCK=MISSING" in result["stdout"]
+
+
+def test_git_ssh_credential_profile_grants_ssh_auth_sock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#407: enrolling the git_ssh profile restores exactly the reach #381's own
+    "allowlist of names, opt-in per repository" pattern already grants for other
+    credential-shaped variables."""
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/real-agent.sock")
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("python3",),
+        credential_profiles=("git_ssh",),
+    )
+    workspace_id = env.service.workspace_create("demo", "git_ssh profile grant")["workspace_id"]
+
+    result = env.service.workspace_run_adhoc(workspace_id, _PRINT_SSH_AUTH_SOCK)
+
+    assert result["returncode"] == 0
+    assert "SSH_AUTH_SOCK=/tmp/real-agent.sock" in result["stdout"]
+
+
 def test_successful_run_redacts_secret_shaped_stdout(tmp_path: Path) -> None:
     """#381 AC3: a command that happened to print a secret-shaped string and still
     exited 0 must not reach the caller's result unredacted. This is already true --
@@ -552,6 +618,43 @@ def test_blocked_git_form_fails_before_execution(tmp_path: Path) -> None:
     assert exc.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
     # No audit event is written because the guard rejects before the audited body runs.
     assert _audit_events(env.root, "workspace_run_adhoc") == []
+
+
+def test_ordinary_push_to_protected_branch_is_blocked(tmp_path: Path) -> None:
+    """#407: an ordinary (non-force) push straight to a protected branch was previously
+    unchecked on the ad-hoc path -- only #385's destructive-form circuit breakers
+    (force/mirror/delete) applied. `main` is protected in the standard test fixture."""
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "push to main blocked")["workspace_id"]
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(workspace_id, ["git", "push", "origin", "main"])
+    assert exc.value.code is ErrorCode.PROTECTED_REF_WRITE_BLOCKED
+    assert _audit_events(env.root, "workspace_run_adhoc") == []
+
+
+def test_push_to_protected_branch_via_head_refspec_is_blocked(tmp_path: Path) -> None:
+    """The same check reads the destination side of an explicit `src:dst` refspec, not
+    just a bare branch-name argument."""
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "push HEAD:main blocked")["workspace_id"]
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(workspace_id, ["git", "push", "origin", "HEAD:main"])
+    assert exc.value.code is ErrorCode.PROTECTED_REF_WRITE_BLOCKED
+
+
+def test_push_with_no_explicit_refspec_is_not_blocked_by_protected_ref_check(
+    tmp_path: Path,
+) -> None:
+    """`git push`/`git push origin` with no explicit destination is not checked by the
+    protected-ref guard: the implicit destination is the workspace's own current branch,
+    which cannot already be protected (workspace creation rejects a protected branch as
+    its own branch). It still requires the ordinary exact-state-lock declaration a
+    REMOTE_WRITE effect needs -- that is a different, pre-existing check, not this one."""
+    env = _relaxed_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "implicit push destination")["workspace_id"]
+    with pytest.raises(RepoForgeError) as exc:
+        env.service.workspace_run_adhoc(workspace_id, ["git", "push", "origin"])
+    assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID
 
 
 def test_mutating_git_command_under_read_only_is_rejected(tmp_path: Path) -> None:

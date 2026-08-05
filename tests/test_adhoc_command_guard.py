@@ -11,6 +11,9 @@ from repoforge.domain.adhoc import (
     classify_adhoc_effect,
     effect_exceeds_declaration,
     effect_to_command_class,
+    extract_git_argv_segments,
+    extract_push_destination_refs,
+    scan_script_for_blocked_git_forms,
 )
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 
@@ -298,3 +301,92 @@ def test_classify_adhoc_effect_has_no_declared_effect_parameter() -> None:
     import inspect
 
     assert list(inspect.signature(classify_adhoc_effect).parameters) == ["argv"]
+
+
+# ---------------------------------------------------------------------------
+# #407: protected-ref destination extraction for ad-hoc `git push`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (("git", "push"), ()),
+        (("git", "push", "origin"), ()),
+        (("git", "push", "origin", "main"), ("main",)),
+        (("git", "push", "origin", "HEAD:main"), ("main",)),
+        (("git", "push", "origin", "refs/heads/main"), ("main",)),
+        (("git", "push", "origin", "HEAD:refs/heads/main"), ("main",)),
+        (("git", "push", "-u", "origin", "main"), ("main",)),
+        (("git", "push", "origin", "+feature:main"), ("main",)),
+        (
+            ("git", "push", "origin", "feature", "HEAD:main"),
+            ("feature", "main"),
+        ),
+        (("git", "status"), ()),
+        (("git",), ()),
+        ((), ()),
+    ],
+)
+def test_extract_push_destination_refs(argv: tuple[str, ...], expected: tuple[str, ...]) -> None:
+    assert extract_push_destination_refs(argv) == expected
+
+
+def test_empty_source_refspec_delete_is_blocked() -> None:
+    """`git push origin :main` deletes the remote ref without the `--delete` flag the
+    pre-existing block list scanned for -- #407 closes this alongside the destination
+    extraction it's related to."""
+    with pytest.raises(RepoForgeError) as excinfo:
+        classify_adhoc_command(("git", "push", "origin", ":main"))
+    assert excinfo.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# #407: best-effort git-invocation scan for the shell-script execution form.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("script", "expected_segments"),
+    [
+        ("git status", (("git", "status"),)),
+        ("echo hi", ()),
+        (
+            "git status; git push --force origin main",
+            (("git", "status"), ("git", "push", "--force", "origin", "main")),
+        ),
+        ("git status && git log", (("git", "status"), ("git", "log"))),
+        ("npm install | git status", (("git", "status"),)),
+        ("git status # comment mentioning git push --force", (("git", "status"),)),
+        ('echo "unterminated', ()),
+    ],
+)
+def test_extract_git_argv_segments(
+    script: str, expected_segments: tuple[tuple[str, ...], ...]
+) -> None:
+    assert extract_git_argv_segments(script) == expected_segments
+
+
+def test_scan_script_for_blocked_git_forms_catches_straightforward_form() -> None:
+    with pytest.raises(RepoForgeError) as excinfo:
+        scan_script_for_blocked_git_forms("git clean --force")
+    assert excinfo.value.code is ErrorCode.IRREVERSIBLE_LOCAL_OPERATION_BLOCKED
+
+
+def test_scan_script_for_blocked_git_forms_catches_destructive_remote_form() -> None:
+    with pytest.raises(RepoForgeError) as excinfo:
+        scan_script_for_blocked_git_forms("git push --force origin main")
+    assert excinfo.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
+
+
+def test_scan_script_for_blocked_git_forms_ignores_safe_content() -> None:
+    scan_script_for_blocked_git_forms("git status && npm test")
+    scan_script_for_blocked_git_forms(
+        "echo 'git push --force' # only a string, but still safe here"
+    )
+
+
+def test_scan_script_for_blocked_git_forms_cannot_see_through_variable_substitution() -> None:
+    """Documents the honest limit (#407): a flag assembled via shell variable
+    substitution is never a literal token this scan inspects."""
+    scan_script_for_blocked_git_forms('FLAG="--force"; git clean "$FLAG"')

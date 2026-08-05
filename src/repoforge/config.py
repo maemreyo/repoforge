@@ -82,14 +82,19 @@ from .domain.verification_steps import (
 )
 
 DEFAULT_PATH_PREFIXES = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
+# SSH_AUTH_SOCK and GIT_SSH_COMMAND deliberately excluded from the unconditional baseline
+# (#407): their presence is exactly what let ad-hoc/workspace_exec push over SSH with the
+# operator's real agent identity, with no opt-in. A repository regains them only by
+# enrolling the "git_ssh" credential profile (domain/credential_profiles.py) -- the same
+# "allowlist of names, opt-in per repository" pattern #381 already established for
+# npm/docker/cloud credentials, now extended to cover what #381 itself explicitly left as
+# unconditional baseline. GH_HOST remains: it names which host to talk to, not a credential.
 DEFAULT_ALLOWED_ENVIRONMENT = (
     "HOME",
     "PATH",
     "LANG",
     "LC_ALL",
-    "SSH_AUTH_SOCK",
     "GH_HOST",
-    "GIT_SSH_COMMAND",
     "COREPACK_HOME",
     "PNPM_HOME",
 )

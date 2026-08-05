@@ -1,15 +1,18 @@
-"""Named, opt-in credential-scoping profiles for generic shell/ad-hoc execution (#381).
+"""Named, opt-in credential-scoping profiles for generic shell/ad-hoc execution (#381, #407).
 
-The server's global `allowed_environment` baseline (HOME/PATH/LANG/LC_ALL plus a small
-set of already-established git/gh transport variables) is unconditional: every ad-hoc
-command in every repository sees it, with no per-run opt-in. That baseline is left
-unchanged here -- it is not this module's job to revoke what already existed.
+The server's global `allowed_environment` baseline (HOME/PATH/LANG/LC_ALL plus GH_HOST and
+a couple of package-manager cache paths) is unconditional: every ad-hoc command in every
+repository sees it, with no per-run opt-in. #381 originally left the git/gh transport
+variables (SSH_AUTH_SOCK, GIT_SSH_COMMAND) in that unconditional baseline too, deferring
+the question of whether ad-hoc execution should be able to use the operator's real git/gh
+identity by default; #407 answered it -- no -- and moved SSH_AUTH_SOCK/GIT_SSH_COMMAND out
+of `DEFAULT_ALLOWED_ENVIRONMENT` (config.py) into the `git_ssh` profile below.
 
-What is missing is a way to grant *additional* credential-shaped environment variables
--- npm/pnpm registry auth, a Docker daemon socket, cloud CLI config -- to a specific
-repository's ad-hoc/exec commands only when that repository explicitly opts in, instead
-of the only alternative being to widen the global baseline for every repository at once.
-A profile here is exactly that: a named, reviewed set of environment-variable *names*
+What this module grants is *additional* credential-shaped environment variables -- git/gh
+remote-write reach, npm/pnpm registry auth, a Docker daemon socket, cloud CLI config -- to
+a specific repository's ad-hoc/exec commands only when that repository explicitly opts in,
+instead of the only alternative being to widen the global baseline for every repository at
+once. A profile here is exactly that: a named, reviewed set of environment-variable *names*
 (never values -- see resolve_credential_profile_env) a repository can enroll in via
 `RepositoryConfig.credential_profiles`, resolved per run into whichever of those names
 are actually present in the host environment.
@@ -28,6 +31,8 @@ from .errors import ConfigError
 MAX_CREDENTIAL_PROFILES = 16
 
 _BUILTIN_CREDENTIAL_PROFILES: dict[str, tuple[str, ...]] = {
+    "git_ssh": ("SSH_AUTH_SOCK", "GIT_SSH_COMMAND"),
+    "github": ("GH_TOKEN", "GITHUB_TOKEN"),
     "npm_registry": ("NPM_TOKEN", "NPM_CONFIG_REGISTRY"),
     "docker": ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CERT_PATH"),
     "cloud_aws": (

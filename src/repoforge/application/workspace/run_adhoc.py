@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from ...config import RepositoryConfig
 from ...domain.adhoc import (
     CommandClass,
     EffectClass,
@@ -28,12 +29,16 @@ from ...domain.adhoc import (
     classify_adhoc_effect,
     effect_exceeds_declaration,
     effect_to_command_class,
+    extract_git_argv_segments,
+    extract_push_destination_refs,
+    scan_script_for_blocked_git_forms,
     validate_adhoc_argv,
     validate_adhoc_script,
     validate_adhoc_sequence,
     validate_adhoc_shell_runner,
     validate_adhoc_stdin,
 )
+from ...domain.circuit_breakers import CircuitBreakerCategory, circuit_breaker_blocked
 from ...domain.credential_profiles import resolve_credential_profile_env
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
@@ -99,8 +104,8 @@ class WorkspaceRunAdhocCommand:
     argv: tuple[str, ...] | None = None
     # Reviewed shell-script form (#377): mutually exclusive with argv. `shell` names the
     # interpreter (validated against repo.adhoc_shell_runners); the actual argv run is
-    # (shell, "-c", script) -- never content-inspected, unlike a git argv (see
-    # validate_adhoc_shell_runner).
+    # (shell, "-c", script) -- not authoritatively content-inspected like a git argv is,
+    # though #407 layers a best-effort scan on top (see scan_script_for_blocked_git_forms).
     script: str | None = None
     shell: str | None = None
     working_directory: str | None = None
@@ -305,6 +310,52 @@ def _adhoc_error(
     )
 
 
+def _assert_push_destination_not_protected(argv: tuple[str, ...], repo: RepositoryConfig) -> None:
+    """Block an ad-hoc ``git push`` whose explicit refspec names a protected branch (#407).
+
+    ``_assert_git_command_allowed`` (invoked via ``classify_adhoc_effect`` before this
+    runs) already blocks force/mirror/delete forms regardless of destination; an ordinary
+    non-force push straight to a protected branch was not previously checked at all on
+    this path -- only at branch-attach time, never from ad-hoc. ``git push``/``git push
+    <remote>`` with no explicit refspec is not checked here because its implicit
+    destination is the workspace's own current branch, which cannot already be protected.
+    """
+    for destination in extract_push_destination_refs(argv):
+        if destination in repo.protected_branches:
+            raise circuit_breaker_blocked(
+                CircuitBreakerCategory.PROTECTED_REF_WRITE,
+                f"git push: destination branch {destination!r} is protected",
+                safe_next_action=(
+                    "Push to a non-protected branch through the ad-hoc runner, use "
+                    "workspace_push against a reviewed branch, or ask the operator to "
+                    "perform this write directly if the protected ref genuinely needs to "
+                    "change."
+                ),
+                unchanged_state=(
+                    "The workspace, configuration, and remote state were not modified.",
+                ),
+            )
+
+
+def _gh_credential_scrub_env(workspace_root: Path) -> tuple[tuple[str, str], ...]:
+    """Point ``gh``'s config/credential lookup at an empty, never-created scratch directory
+    instead of the ambient ``$HOME/.config/gh`` (#407).
+
+    Ad-hoc/``workspace_exec`` runs the operator's real ``HOME`` unmodified (many legitimate
+    non-git tools need it), which means an ad-hoc ``gh`` call would otherwise silently
+    authenticate with the operator's own on-disk OAuth token with no opt-in at all --
+    exactly the gap #407 requires closed ("keep remote-write credentials out of generic
+    shell environments by default"). Overriding only ``GH_CONFIG_DIR`` (not ``HOME``) is
+    narrow enough to leave every other ambient-``HOME``-dependent tool untouched, mirroring
+    the same override the typed GitHub-read path already applies in
+    ``adapters/github/repository_observation.py:_base_environment``. A repository that
+    enrolls the ``github`` credential profile (#381 catalog) and supplies ``GH_TOKEN``/
+    ``GITHUB_TOKEN`` still authenticates normally -- ``gh`` prefers a token env var over its
+    on-disk config regardless of ``GH_CONFIG_DIR``.
+    """
+    return (("GH_CONFIG_DIR", str(workspace_root / ".repoforge-empty-gh-config")),)
+
+
 def _resolve_working_directory(workspace: Path, working_directory: str | None) -> Path:
     if working_directory is None:
         return workspace
@@ -411,10 +462,14 @@ class WorkspaceAdhocRunner:
             shell = validate_adhoc_shell_runner(c.shell or "", repo.adhoc_shell_runners)
             script = validate_adhoc_script(c.script)
             argv = (shell, "-c", script)
-            # A script body is never content-inspected: classify_adhoc_effect only
-            # inspects when argv[0] == "git" literally, so this is opaque exactly like
-            # every non-git argv runner already is -- not a new gap (see
-            # validate_adhoc_shell_runner).
+            # classify_adhoc_effect only inspects when argv[0] == "git" literally, so the
+            # script body as a whole is opaque to it exactly like every non-git argv
+            # runner already is -- not a new gap. scan_script_for_blocked_git_forms
+            # (#407) is a best-effort, additive scan for a git-shaped invocation embedded
+            # in the script text; it is not authoritative (see its own docstring).
+            scan_script_for_blocked_git_forms(script)
+            for segment in extract_git_argv_segments(script):
+                _assert_push_destination_not_protected(segment, repo)
             effect_class = None
         else:
             if c.argv is None:
@@ -427,6 +482,7 @@ class WorkspaceAdhocRunner:
             # forms (raising ADHOC_COMMAND_FORBIDDEN before any process starts) and infers
             # the git command's effect (#382). Non-git runners return None (opaque).
             effect_class = classify_adhoc_effect(argv)
+            _assert_push_destination_not_protected(argv, repo)
         command_class = None if effect_class is None else effect_to_command_class(effect_class)
         declared_effect = _resolve_declared_effect(c.declared_effect, c.mutability)
         effect_mismatch = effect_class is not None and effect_exceeds_declaration(
@@ -553,7 +609,10 @@ class WorkspaceAdhocRunner:
                     output_limit=self.ctx.config.server.max_tool_output_chars,
                     cancel_token=cancel_token,
                     stdin_text=stdin_text,
-                    extra_env=resolve_credential_profile_env(locked_repo.credential_profiles),
+                    extra_env=(
+                        *resolve_credential_profile_env(locked_repo.credential_profiles),
+                        *_gh_credential_scrub_env(locked_workspace),
+                    ),
                 )
                 try:
                     with (
@@ -715,6 +774,8 @@ class WorkspaceAdhocRunner:
             )
         validated = validate_adhoc_sequence(c.argv_sequence, repo.effective_adhoc_runners())
         effect_classes = [classify_adhoc_effect(argv) for argv in validated]
+        for argv in validated:
+            _assert_push_destination_not_protected(argv, repo)
         command_classes = [
             None if effect is None else effect_to_command_class(effect) for effect in effect_classes
         ]
@@ -839,7 +900,10 @@ class WorkspaceAdhocRunner:
                         output_limit=self.ctx.config.server.max_tool_output_chars,
                         cancel_token=c.cancellation_token,
                         stdin_text=None,
-                        extra_env=resolve_credential_profile_env(locked_repo.credential_profiles),
+                        extra_env=(
+                            *resolve_credential_profile_env(locked_repo.credential_profiles),
+                            *_gh_credential_scrub_env(locked_workspace),
+                        ),
                     )
                     try:
                         with (
