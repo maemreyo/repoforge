@@ -206,3 +206,27 @@ Before presenting a change as complete:
 - generated distributions build successfully;
 - the final diff contains only intended changes;
 - the completion report lists every command actually run and every live check not run.
+
+### Reviving an old PR whose work was partially squash-merged
+
+A PR that has been open across a squash-merge of most of its content onto `main` is
+not a candidate for a blind `git rebase` or a full `git cherry-pick` of its branch
+history: the squash is not patch-identical to the original commits, so those
+operations replay already-merged ancestors and conflict. Reconstruct the change as a
+minimal delta instead:
+
+1. Inspect merge-base and divergence between the PR branch and `main`.
+2. Compare the final trees (`git diff main...pr-branch`) and check patch/tree overlap
+   with what `main` already contains.
+3. Identify commits that were squash-equivalently absorbed by `main`.
+4. When the branch history is no longer replay-safe, rebuild a minimal branch from
+   exact `origin/main`: apply only the unique delta (verified by a tree diff), and
+   keep any fix `main` does not already carry.
+5. Run the PR gates (unit, lint, typecheck, coverage-map check) on the rebuilt HEAD.
+6. After merge, verify the push-only/main-only gates — `canonical-coverage` and
+   `compatibility` typically run only on `main` pushes, and a coverage-map repair is
+   not proven until the `main` run goes green.
+7. Only then clean up the workspace and the merged branch.
+
+Do not declare a change mergeable on a HEAD whose CI never ran, and never let a
+squash-merged equivalent in `main` be silently dropped from the rebuilt delta.
