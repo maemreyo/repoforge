@@ -275,6 +275,56 @@ def test_seed_if_missing_never_overwrites_an_existing_ledger(tmp_path: Path) -> 
     assert store.read() == recorded
 
 
+def test_a_corrupt_restart_history_ledger_fails_closed_rather_than_resetting(
+    tmp_path: Path,
+) -> None:
+    """A corrupt ledger file is NOT equivalent to a missing one (#448 review): every
+    entry point must fail typed and closed rather than silently treating unreadable
+    content as "no ledger yet" -- which would either reset restart evidence to zero
+    (`record_restart`) or let a stale legacy snapshot overwrite real history that
+    simply couldn't be parsed this time (`seed_if_missing`).
+    """
+    from repoforge.adapters.runtime.state_store import JsonRestartHistoryStore
+
+    path = tmp_path / "restart-history.json"
+    corrupt_content = "{not valid json"
+    path.write_text(corrupt_content, encoding="utf-8")
+
+    store = JsonRestartHistoryStore(path)
+
+    with pytest.raises(ConfigError) as read_error:
+        store.read()
+    # The path is useful for an operator to investigate; the raw corrupt content is
+    # not -- it must never be echoed back into an error surface.
+    assert str(path) in str(read_error.value)
+    assert corrupt_content not in str(read_error.value)
+
+    # seed_if_missing must not treat "unreadable" as "absent" and silently overwrite
+    # the corrupt file with a legacy snapshot -- that would discard whatever real
+    # history the corrupt file might contain, unrecoverably.
+    with pytest.raises(ConfigError):
+        store.seed_if_missing(
+            restarts_total=99,
+            last_restart_at="2000-01-01T00:00:00+00:00",
+            incarnation_id="d" * 24,
+            occurred_at="2026-08-05T00:00:00+00:00",
+        )
+
+    # record_restart must not treat "unreadable" as "no history yet" and start a
+    # fresh count from zero -- that would silently understate real restart history.
+    with pytest.raises(ConfigError):
+        store.record_restart(
+            incarnation_id="d" * 24,
+            reason="a restart attempted while the ledger is corrupt",
+            occurred_at="2026-08-05T00:00:05+00:00",
+            event_id="event-1",
+        )
+
+    # The corrupt file itself is left exactly as it was, for investigation -- none of
+    # the three calls above reset it, "repaired" it, or deleted it.
+    assert path.read_text(encoding="utf-8") == corrupt_content
+
+
 def _write_fake_tunnel(path: Path) -> None:
     path.write_text(
         """#!/usr/bin/env python3
