@@ -6,6 +6,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import random
 import signal
 import sys
 import threading
@@ -26,20 +27,33 @@ from ...domain.runtime import (
     ControlRequest,
     ControlResponse,
     HealthCheck,
+    RestartHistoryRecord,
     RuntimePhase,
     RuntimeRecord,
     TunnelProfile,
     transition,
 )
+from ...domain.runtime_events import RuntimeEventV1, encode_runtime_event
 from ...ports.clock import Clock
 from ...ports.configuration import ConfigurationStore
 from ...ports.execution_worker import ExecutionWorkerClient
 from ...ports.ids import IdGenerator
 from ...ports.locking import LockManager
 from ...ports.process import ProcessInspector
-from ...ports.runtime_control import RuntimeControlClient, RuntimeControlServer, RuntimeStore
+from ...ports.runtime_control import (
+    RestartHistoryStore,
+    RuntimeControlClient,
+    RuntimeControlServer,
+    RuntimeStore,
+)
 from ...ports.tunnel import TunnelClient, TunnelProfileStore
 from .execution_worker_reconciler import ExecutionWorkerReconciler
+
+# Health-check name for a generation-adoption read failure (#448 Slice 6 review): an
+# observability/persistence problem, never a service failure -- the watchdog filters
+# this exact name out when deciding whether to count a restart or terminate the child,
+# so the name is shared here rather than duplicated as a string literal.
+_RUNTIME_STATE_READ_CHECK = "runtime_state_read"
 
 
 def _install_origin() -> str | None:
@@ -55,6 +69,30 @@ def _install_origin() -> str | None:
     return "environment"
 
 
+def _restart_backoff_seconds(
+    restart_count: int,
+    *,
+    jitter: Callable[[float, float], float] = random.uniform,
+) -> float:
+    """Bounded exponential backoff with jitter before the next restart attempt.
+
+    Jitter, not just backoff, is the point (#448 Slice 5): a remote outage (Signature
+    B) can knock several components' tunnel-children unhealthy at close to the same
+    moment, and a purely deterministic delay would have every one of them retry in
+    lockstep -- backoff alone bounds how OFTEN one supervisor retries, not whether many
+    supervisors retry in the same instant. "Equal jitter" (half the bounded delay fixed,
+    half randomized) keeps the same overall cap this formula always had while making
+    that lockstep vanishingly unlikely, and still guarantees a real minimum delay
+    between attempts (never near-zero, unlike "full jitter").
+
+    ``jitter`` is injectable (#448 Slice 5 review) so tests can assert exact bounds
+    against a scripted sequence instead of depending on the global `random` module's
+    state; it defaults to `random.uniform`, a real random source, in production.
+    """
+    base: float = min(4.0, 0.25 * (2 ** (restart_count - 1)))
+    return base / 2 + jitter(0, base / 2)
+
+
 class RuntimeSupervisor:
     PROTOCOL_VERSION = RUNTIME_CONTROL_PROTOCOL_VERSION
 
@@ -62,6 +100,7 @@ class RuntimeSupervisor:
         self,
         *,
         store: RuntimeStore,
+        restart_history: RestartHistoryStore,
         configs: ConfigurationStore,
         locks: LockManager,
         control: RuntimeControlServer,
@@ -90,8 +129,13 @@ class RuntimeSupervisor:
         health_snapshot_stale_after_seconds: float = 30.0,
         preflight: Callable[[], None] | None = None,
         worker_reconciler: ExecutionWorkerReconciler | None = None,
+        # Injectable jitter source for restart backoff (#448 Slice 5 review): defaults
+        # to a real random source in production; tests inject a scripted callable
+        # instead of depending on the global `random` module's state.
+        jitter: Callable[[float, float], float] | None = None,
     ) -> None:
         self._store = store
+        self._restart_history = restart_history
         self._configs = configs
         self._locks = locks
         self._control = control
@@ -126,10 +170,24 @@ class RuntimeSupervisor:
         self._health_snapshot_stale_after = health_snapshot_stale_after_seconds
         self._preflight = preflight
         self._worker_reconciler = worker_reconciler
+        self._jitter = jitter if jitter is not None else random.uniform
         self._stop = threading.Event()
         self._child: ChildProcess | None = None
         self._execution_child: ChildProcess | None = None
         self._execution_generation: int | None = None
+        # In-memory terminal latch (#448 Slice 6 review): set whenever the durable
+        # restart-history ledger write fails, since the FAIL_CLOSED record that
+        # decision depends on may ALSO fail to persist (the same underlying cause --
+        # e.g. a full disk -- often breaks both writes at once). The control plane
+        # must still answer with the true reason this incarnation is fail-closed even
+        # when nothing durable says so; `_control_handler` prefers this over
+        # `self._store.read()` whenever it is set.
+        self._fail_closed_override: RuntimeRecord | None = None
+        # Set whenever `_adopt_committed_runtime_generation` cannot read the store
+        # (#448 Slice 6 review); folded into `_observe_health` so the watchdog reports
+        # unhealthy rather than silently treating the read failure as "no committed
+        # generation" and continuing as if everything were fine.
+        self._generation_read_failed_detail: str | None = None
 
     def _ensure_execution_worker(
         self,
@@ -167,7 +225,21 @@ class RuntimeSupervisor:
     def _adopt_committed_runtime_generation(self, fallback: int) -> int:
         """Adopt a hot-reloaded generation only when disk and runtime state agree."""
         active = self._configs.active()
-        record = self._store.read()
+        # A broken store here (#448 Slice 6 review) must not crash the run loop before
+        # it ever reaches the fail-closed machinery elsewhere -- but unreadable is NOT
+        # equivalent to "no committed generation": that would erase the difference
+        # between "nothing new to adopt" and "the durable state is currently broken".
+        # Keeping `fallback` is still the safe choice here (never silently adopt an
+        # unproven target), but the failure must not vanish -- `_observe_health` folds
+        # `self._generation_read_failed_detail` into its check set so the watchdog
+        # stops reporting `healthy` while this persists, rather than silently
+        # continuing as if the read had simply found nothing.
+        try:
+            record = self._store.read()
+            self._generation_read_failed_detail = None
+        except Exception as exc:
+            self._generation_read_failed_detail = redact_text(f"{type(exc).__name__}: {exc}")
+            return fallback
         if (
             active is not None
             and record is not None
@@ -207,6 +279,7 @@ class RuntimeSupervisor:
         profile: TunnelProfile,
         tool_surface_hash: str,
         correlation_id: str,
+        incarnation_id: str,
         child: ChildProcess | None,
         restart_count: int = 0,
         error_code: str | None = None,
@@ -215,6 +288,7 @@ class RuntimeSupervisor:
         consecutive_health_failures: int = 0,
         restarts_total: int = 0,
         last_restart_at: str | None = None,
+        restart_history_provenance: str = "unknown",
         fail_closed_since: str | None = None,
     ) -> RuntimeRecord:
         pid = os.getpid()
@@ -251,7 +325,97 @@ class RuntimeSupervisor:
             restarts_total=restarts_total,
             last_restart_at=last_restart_at,
             fail_closed_since=fail_closed_since,
+            incarnation_id=incarnation_id,
+            restart_history_provenance=restart_history_provenance,
         )
+
+    def _record_restart_or_fail_closed(
+        self,
+        *,
+        generation: int,
+        profile: TunnelProfile,
+        tool_surface_hash: str,
+        correlation_id: str,
+        incarnation_id: str,
+        reason: str,
+        restart_count: int,
+        occurred_at: str,
+        restarts_total: int,
+        last_restart_at: str | None,
+        restart_history_provenance: str,
+    ) -> RestartHistoryRecord | None:
+        """Record one restart in the durable ledger, or fail closed if that write fails.
+
+        A ledger write can fail (disk full, lock contention, a corrupt sibling lock
+        file...) at the exact moment a caller is about to decide whether to respawn the
+        tunnel child. Before this, an unhandled failure here fell through to the
+        generic top-level handler, which writes a bare `FAILED` record and returns a
+        nonzero exit -- exactly the launchd `KeepAlive` relaunch this whole issue exists
+        to bound, now triggered by the ledger itself rather than the tunnel (#448 Slice
+        4). Returning `None` means "already handled": the caller must return 0
+        immediately without spawning a new child, since `_serve_fail_closed` below has
+        already blocked until an explicit stop.
+
+        The durable FAIL_CLOSED write below is itself best-effort (#448 Slice 6
+        review): if the persistent store is unavailable for the same reason the ledger
+        write just failed (e.g. the whole state directory's disk is out of space), that
+        write can ALSO raise. Letting that second exception propagate would land right
+        back in the same top-level handler this whole method exists to avoid -- staying
+        resident-but-unrecorded is strictly safer than exiting nonzero and letting
+        launchd relaunch into the identical failure. Every side effect here is
+        independently suppressed so a failure in one (the durable record, the target
+        clear, the event log) can never prevent `_serve_fail_closed` from still running.
+
+        `self._fail_closed_override` is set unconditionally, before the durable write is
+        even attempted: the control plane must report this exact typed reason for the
+        rest of this incarnation's life regardless of whether the durable write below
+        actually lands, since a caller reading `rf runtime status` during an outage has
+        no other way to learn this isn't just a stale `healthy`/`degraded` snapshot.
+        """
+        try:
+            return self._restart_history.record_restart(
+                incarnation_id=incarnation_id,
+                reason=reason,
+                occurred_at=occurred_at,
+                event_id=f"{incarnation_id}:{restart_count}",
+            )
+        except Exception as exc:
+            error_text = redact_text(f"{type(exc).__name__}: {exc}")
+            fail_closed_record = self._record(
+                RuntimePhase.FAIL_CLOSED,
+                accepted_generation=generation,
+                active_generation=None,
+                profile=profile,
+                tool_surface_hash=tool_surface_hash,
+                correlation_id=correlation_id,
+                incarnation_id=incarnation_id,
+                child=None,
+                restart_count=restart_count,
+                restarts_total=restarts_total,
+                last_restart_at=last_restart_at,
+                restart_history_provenance=restart_history_provenance,
+                error_code="RESTART_LEDGER_WRITE_FAILED",
+                error=error_text,
+                fail_closed_since=self._clock.now_iso(),
+            )
+            self._fail_closed_override = fail_closed_record
+            with contextlib.suppress(Exception):
+                self._store.write(fail_closed_record)
+            with contextlib.suppress(Exception):
+                self._clear_target(generation)
+            with contextlib.suppress(Exception):
+                self._append_supervisor_event(
+                    event_kind="restart_ledger_write_failed",
+                    level="ERROR",
+                    message=(
+                        "Restart-history ledger write failed; the durable fail-closed "
+                        f"record may also be unwritable: {error_text}"
+                    ),
+                    correlation_id=correlation_id,
+                    incarnation_id=incarnation_id,
+                )
+            self._serve_fail_closed(correlation_id, incarnation_id)
+            return None
 
     def _run_preflight(self) -> tuple[str, str] | None:
         """Run the deterministic preflight; ``(error_code, message)`` on failure."""
@@ -291,7 +455,7 @@ class RuntimeSupervisor:
         current_release = os.environ.get("REPOFORGE_RUNNING_RELEASE_SHA")
         return current_release == prior.running_release_sha
 
-    def _serve_fail_closed(self, correlation_id: str) -> None:
+    def _serve_fail_closed(self, correlation_id: str, incarnation_id: str) -> None:
         """Block serving the control socket until an explicit SHUTDOWN.
 
         Deterministic, non-retryable failures must never be respawned and must never
@@ -299,22 +463,48 @@ class RuntimeSupervisor:
         lifetimes. The control plane stays answerable in FAIL_CLOSED so ``rf doctor`` /
         ``rf runtime status`` can read the typed failure; an explicit SHUTDOWN
         terminalizes to STOPPED (which launchd does not relaunch).
+
+        Persisting that terminal STOPPED transition is itself best-effort (#448 Slice 6
+        review): a store that is unavailable at shutdown -- the same disk-full
+        condition that may have caused this fail-closed state in the first place --
+        must never turn a clean, explicit shutdown into a nonzero exit. `run()`'s
+        caller always returns 0 after this method returns; an unhandled exception here
+        would instead propagate to the top-level handler's `return 2`, which is exactly
+        the launchd relaunch this whole method exists to prevent. Only the persistence
+        errors this is actually expecting (`OSError`, `ConfigError`) are caught here --
+        broad enough to cover a real broken store, narrow enough not to silently
+        swallow a programming error -- and the failure is still surfaced, best-effort,
+        via the runtime event log rather than vanishing entirely.
         """
         self._stop.wait()
-        current = self._store.read()
-        if current is not None:
-            self._store.write(
-                replace(
-                    current,
-                    phase=RuntimePhase.STOPPED,
-                    pid=None,
-                    process_identity=None,
-                    child_pid=None,
-                    child_process_identity=None,
-                    active_generation=None,
-                    updated_at=self._clock.now_iso(),
+        try:
+            current = self._fail_closed_override or self._store.read()
+            if current is not None:
+                self._store.write(
+                    replace(
+                        current,
+                        phase=RuntimePhase.STOPPED,
+                        pid=None,
+                        process_identity=None,
+                        child_pid=None,
+                        child_process_identity=None,
+                        active_generation=None,
+                        updated_at=self._clock.now_iso(),
+                    )
                 )
-            )
+        except (OSError, ConfigError) as exc:
+            with contextlib.suppress(Exception):
+                self._append_supervisor_event(
+                    event_kind="stopped_persist_failed",
+                    level="ERROR",
+                    message=(
+                        "Failed to persist the terminal STOPPED state during shutdown "
+                        f"(the process is still exiting cleanly): "
+                        f"{redact_text(f'{type(exc).__name__}: {exc}')}"
+                    ),
+                    correlation_id=correlation_id,
+                    incarnation_id=incarnation_id,
+                )
 
     def _tunnel_health(self, child: ChildProcess) -> tuple[HealthCheck, ...]:
         probe = getattr(self._tunnel, "health", None)
@@ -406,6 +596,18 @@ class RuntimeSupervisor:
             except Exception as exc:
                 mcp_detail = redact_text(f"MCP health probe failed: {type(exc).__name__}: {exc}")
         checks.append(HealthCheck("repository_self_check", mcp_ok, mcp_detail))
+        # Appended LAST, deliberately after the MCP round-trip gate above (#448 Slice 6
+        # review): a read failure in `_adopt_committed_runtime_generation` is not
+        # evidence that nothing needs adopting -- it means the durable state is
+        # currently unreadable -- and folding it in here rather than silently keeping
+        # the fallback generation and moving on is what stops the watchdog from
+        # continuing to report `healthy` while this persists. It must never itself
+        # cascade into skipping the MCP repository check above (that gate gauges
+        # actual repository health, not this), which is why it is added only now.
+        if self._generation_read_failed_detail is not None:
+            checks.append(
+                HealthCheck(_RUNTIME_STATE_READ_CHECK, False, self._generation_read_failed_detail)
+            )
         legacy = tuple(check.legacy() for check in checks)
         return all(check.ok for check in checks), legacy
 
@@ -426,7 +628,10 @@ class RuntimeSupervisor:
         return max(0.0, (now - observed).total_seconds())
 
     def _control_handler(self, request: ControlRequest) -> ControlResponse:
-        record = self._store.read()
+        # `self._fail_closed_override` (#448 Slice 6 review) short-circuits `read()`
+        # entirely when set, so a broken store can never hide the true typed reason
+        # this incarnation is fail-closed behind a stale snapshot or a read failure.
+        record = self._fail_closed_override or self._store.read()
         child_alive = bool(self._child and self._tunnel.is_alive(self._child))
         execution_worker_alive = bool(
             self._execution_worker
@@ -441,6 +646,13 @@ class RuntimeSupervisor:
             "execution_worker_alive": execution_worker_alive,
             "health": list(record.health) if record else [],
             "health_observed_at": record.health_observed_at if record else None,
+            # Surfaced on every command (#448 Slice 6 review), not only in each
+            # command's own `error_code` field: PING and STATUS never carried the
+            # phase's typed reason at all, so an operator reading `rf runtime status`
+            # during an outage could see `record: fail_closed` with no way to learn
+            # WHY without a separate, possibly-also-broken durable read.
+            "last_error_code": record.last_error_code if record else None,
+            "last_error": record.last_error if record else None,
         }
         if request.command is ControlCommand.PING:
             return ControlResponse(
@@ -532,7 +744,7 @@ class RuntimeSupervisor:
         )
 
     @contextlib.contextmanager
-    def _single_instance_lock(self, correlation_id: str) -> Iterator[None]:
+    def _single_instance_lock(self, correlation_id: str, *, incarnation_id: str) -> Iterator[None]:
         """Take the single-instance lock, waiting a bounded interval for a handoff.
 
         An activation replaces this process: the incoming supervisor starts while the
@@ -555,15 +767,77 @@ class RuntimeSupervisor:
         except ConfigError as exc:
             if entered or "LOCK_TIMEOUT" not in str(exc):
                 raise
-            raise ConfigError(
+            message = (
                 "RUNTIME_SUPERVISOR_HANDOFF_TIMEOUT: another supervisor still holds "
                 f"'runtime-single-instance' after {self._single_instance_wait:g}s "
                 f"({self._single_instance_holder()}). Stop it with `rf runtime stop` "
                 "before starting this one; two live supervisors are never started."
-            ) from exc
+            )
+            # Structured, not just an uncaught exception on stderr: this refused
+            # incarnation exits before ever calling `self._store.write(...)`, so its own
+            # runtime record is never touched -- exactly right, since overwriting the
+            # *incumbent's* live record with this refused process's failure would falsely
+            # report a healthy incumbent as failed (the bug an earlier version of this
+            # fix had, caught by this file's own
+            # `test_a_lock_that_is_never_released_is_a_typed_handoff_timeout`). This
+            # event is appended to the runtime log instead -- the same file/format the
+            # tunnel child's own events already use -- so an operator or agent checking
+            # it first, per this fix's own acceptance bar, sees this rather than only a
+            # raw Python traceback wherever launchd points stderr (#448 Slice 5).
+            with contextlib.suppress(Exception):
+                self._append_supervisor_event(
+                    event_kind="handoff_timeout",
+                    level="ERROR",
+                    message=message,
+                    correlation_id=correlation_id,
+                    incarnation_id=incarnation_id,
+                )
+            raise ConfigError(message) from exc
+
+    def _append_supervisor_event(
+        self,
+        *,
+        event_kind: str,
+        level: str,
+        message: str,
+        correlation_id: str,
+        incarnation_id: str,
+    ) -> None:
+        """Append one structured supervisor-lifecycle event to the runtime log.
+
+        Uses the same `RuntimeEventV1`/JSONL format the tunnel child's own log-pump
+        already writes to this file, so an existing reader (`parse_runtime_event`, `rf
+        doctor`'s log inspection) needs no new format to understand (#448 Slice 5).
+        Deliberately minimal compared to `TunnelCliClient._append_runtime_event`
+        (no rotation): supervisor-lifecycle events are rare, not a per-line stream.
+        """
+        event = RuntimeEventV1(
+            observed_at=self._clock.now_iso(),
+            component="supervisor",
+            stream="lifecycle",
+            level=level,
+            event_kind=event_kind,
+            message=redact_text(f"{message} (incarnation_id={incarnation_id})"),
+            correlation_id=correlation_id,
+        )
+        encoded = (encode_runtime_event(event) + "\n").encode("utf-8", errors="replace")
+        self._log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(self._log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "ab", buffering=0) as handle:
+            handle.write(encoded)
 
     def _single_instance_holder(self) -> str:
-        """Describe the current lock holder from the lock file, for the timeout message."""
+        """Describe the current lock holder from the lock file, for the timeout message.
+
+        Distinguishes the two situations this timeout actually covers, which call for
+        different operator responses (#448 Slice 5): a holder pid that is still alive is
+        an in-progress handoff -- the prior incarnation is still shutting down, and
+        waiting (or trying again shortly) is the right call; a holder pid that is no
+        longer alive is unexpected (the OS releases `flock` when the holding process
+        exits) and worth reporting honestly rather than folding into the same generic
+        message, since it points at a different kind of problem (a lock genuinely stuck
+        held by something else, e.g. a process that inherited the descriptor).
+        """
         try:
             path = self._locks.path_for("runtime-single-instance")
             payload = json.loads(path.read_text(encoding="utf-8") or "{}")
@@ -571,7 +845,14 @@ class RuntimeSupervisor:
             return "holder unknown"
         if not isinstance(payload, dict) or not payload.get("pid"):
             return "holder unknown"
-        return f"holder pid {payload['pid']}"
+        pid = payload["pid"]
+        if not isinstance(pid, int):
+            return "holder unknown"
+        if self._processes.identity(pid) is not None:
+            return (
+                f"holder pid {pid} is still alive (a prior incarnation likely still shutting down)"
+            )
+        return f"holder pid {pid} is no longer alive (lock is unexpectedly still held)"
 
     def run(
         self,
@@ -582,7 +863,12 @@ class RuntimeSupervisor:
         environment: dict[str, str],
     ) -> int:
         correlation_id = self._ids.new_hex(24)
-        with self._single_instance_lock(correlation_id):
+        # A fresh, non-reused identifier for THIS supervisor process lifetime, distinct
+        # from `correlation_id` above (which is also reused per-request in
+        # `ControlRequest`/`ControlResponse` and is therefore unsuitable as a lifecycle
+        # identifier on its own) -- #448 Slice 4.
+        incarnation_id = self._ids.new_hex(24)
+        with self._single_instance_lock(correlation_id, incarnation_id=incarnation_id):
             self._control.start(self._control_handler)
             previous_handlers: dict[signal.Signals, object] = {}
 
@@ -595,14 +881,92 @@ class RuntimeSupervisor:
                 for signum in (signal.SIGTERM, signal.SIGINT):
                     previous_handlers[signal.Signals(signum)] = signal.signal(signum, stop_handler)
             restart_count = 0
-            # Carried across supervisor lifetimes: a supervisor that itself restarted would
-            # otherwise republish `0 restarts` and erase the history an operator is reading
-            # the record to find.
-            prior_record = self._store.read()
-            restarts_total = prior_record.restarts_total if prior_record is not None else 0
+            # Carried across supervisor lifetimes from the durable restart-history ledger,
+            # NOT `self._store` -- `JsonRuntimeStore.read()` self-heals to `None` whenever
+            # the recorded pid no longer matches a live process, which is true on
+            # essentially every real restart (a fresh incarnation is never the same pid as
+            # the one that just died). Reading `restarts_total`/`last_restart_at` from that
+            # same self-healing record was discarding them as collateral damage of a check
+            # that has nothing to do with restart history (#448 Slice 4; the incident this
+            # ledger fixes: a fresh incarnation reported `restarts_total: 0`,
+            # `last_restart_at: null` despite real prior restarts).
+            prior_history = self._restart_history.read()
+            if prior_history is None:
+                # Migration (#448 Slice 4): this release may be the first to run since
+                # the ledger existed at all, while `self._store`'s file can still carry
+                # real `restarts_total`/`last_restart_at` history from before -- seeding
+                # from it (bypassing the pid-liveness self-heal, which would otherwise
+                # discard it) beats silently starting over at a false `0`.
+                # `seed_if_missing` itself re-checks the ledger under its own lock, so
+                # two incarnations racing to seed for the first time cannot disagree.
+                legacy_evidence = self._store.peek_restart_evidence()
+                if legacy_evidence is not None:
+                    legacy_total, legacy_last_restart_at = legacy_evidence
+                    prior_history = self._restart_history.seed_if_missing(
+                        restarts_total=legacy_total,
+                        last_restart_at=legacy_last_restart_at,
+                        incarnation_id=incarnation_id,
+                        occurred_at=self._clock.now_iso(),
+                    )
+            restarts_total = prior_history.restarts_total if prior_history is not None else 0
             last_restart_at: str | None = (
-                prior_record.last_restart_at if prior_record is not None else None
+                prior_history.last_restart_at if prior_history is not None else None
             )
+            # Distinguishes "verified zero restarts" from "the ledger predates this build
+            # or was otherwise unavailable" -- an operator reading a bare `0` cannot tell
+            # those apart otherwise (#448 Slice 4).
+            restart_history_provenance = "durable" if prior_history is not None else "unknown"
+            # A broken store here (#448 Slice 6 review) must not crash this incarnation
+            # before it ever reaches the fail-closed machinery below -- there was no
+            # enclosing `try` around this specific read at all before. But unreadable is
+            # NOT equivalent to absent: this read is exactly what proves whether a prior
+            # incarnation already latched a durable fail-closed state for this release
+            # (`_durable_fail_closed` below). Silently treating a read failure as "no
+            # prior record" would make the circuit breaker vanish precisely when it
+            # cannot be disproven either -- the supervisor would run preflight and could
+            # respawn the tunnel child, reopening the exact restart cycle Slice 5 exists
+            # to keep closed. An unreadable prior state must fail closed itself, in
+            # memory, before ever reaching preflight or a tunnel-start attempt.
+            try:
+                prior_record = self._store.read()
+            except Exception as exc:
+                error_text = redact_text(f"{type(exc).__name__}: {exc}")
+                fail_closed_record = self._record(
+                    RuntimePhase.FAIL_CLOSED,
+                    accepted_generation=generation,
+                    active_generation=None,
+                    profile=profile,
+                    tool_surface_hash=tool_surface_hash,
+                    correlation_id=correlation_id,
+                    incarnation_id=incarnation_id,
+                    child=None,
+                    restarts_total=restarts_total,
+                    last_restart_at=last_restart_at,
+                    restart_history_provenance=restart_history_provenance,
+                    error_code="RUNTIME_STATE_READ_FAILED",
+                    error=error_text,
+                    fail_closed_since=self._clock.now_iso(),
+                )
+                self._fail_closed_override = fail_closed_record
+                with contextlib.suppress(Exception):
+                    self._store.write(fail_closed_record)
+                with contextlib.suppress(Exception):
+                    self._clear_target(generation)
+                with contextlib.suppress(Exception):
+                    self._append_supervisor_event(
+                        event_kind="runtime_state_read_failed",
+                        level="ERROR",
+                        message=(
+                            "Could not read durable runtime state at startup; a prior "
+                            "fail-closed latch can neither be confirmed nor ruled out, "
+                            f"so this incarnation fails closed rather than risk "
+                            f"repeating an exhausted restart cycle: {error_text}"
+                        ),
+                        correlation_id=correlation_id,
+                        incarnation_id=incarnation_id,
+                    )
+                self._serve_fail_closed(correlation_id, incarnation_id)
+                return 0
             try:
                 if prior_record is not None and self._durable_fail_closed(prior_record):
                     # A prior lifetime already failed closed for this release; honoring
@@ -620,6 +984,7 @@ class RuntimeSupervisor:
                             profile=profile,
                             tool_surface_hash=tool_surface_hash,
                             correlation_id=correlation_id,
+                            incarnation_id=incarnation_id,
                             child=None,
                             error_code=code,
                             error=error,
@@ -627,7 +992,7 @@ class RuntimeSupervisor:
                         )
                     )
                     self._clear_target(generation)
-                    self._serve_fail_closed(correlation_id)
+                    self._serve_fail_closed(correlation_id, incarnation_id)
                     return 0
 
                 preflight_error = self._run_preflight()
@@ -641,6 +1006,7 @@ class RuntimeSupervisor:
                             profile=profile,
                             tool_surface_hash=tool_surface_hash,
                             correlation_id=correlation_id,
+                            incarnation_id=incarnation_id,
                             child=None,
                             error_code=code,
                             error=message,
@@ -648,7 +1014,7 @@ class RuntimeSupervisor:
                         )
                     )
                     self._clear_target(generation)
-                    self._serve_fail_closed(correlation_id)
+                    self._serve_fail_closed(correlation_id, incarnation_id)
                     return 0
 
                 # Reclaim execution workers whose owner supervisor is gone before
@@ -687,6 +1053,7 @@ class RuntimeSupervisor:
                                 profile=profile,
                                 tool_surface_hash=tool_surface_hash,
                                 correlation_id=correlation_id,
+                                incarnation_id=incarnation_id,
                                 child=None,
                                 error_code=code,
                                 error=redact_text(detail),
@@ -694,7 +1061,7 @@ class RuntimeSupervisor:
                             )
                         )
                         self._clear_target(generation)
-                        self._serve_fail_closed(correlation_id)
+                        self._serve_fail_closed(correlation_id, incarnation_id)
                         return 0
 
                 try:
@@ -715,6 +1082,7 @@ class RuntimeSupervisor:
                             profile=profile,
                             tool_surface_hash=tool_surface_hash,
                             correlation_id=correlation_id,
+                            incarnation_id=incarnation_id,
                             child=None,
                             error_code="TUNNEL_DOCTOR_FAILED",
                             error=redact_text(doctor_detail),
@@ -741,6 +1109,7 @@ class RuntimeSupervisor:
                                 profile=profile,
                                 tool_surface_hash=tool_surface_hash,
                                 correlation_id=correlation_id,
+                                incarnation_id=incarnation_id,
                                 child=None,
                                 error_code="EXECUTION_WORKER_REGISTRATION_FAILED",
                                 error=redact_text(str(exc)),
@@ -748,7 +1117,7 @@ class RuntimeSupervisor:
                             )
                         )
                         self._clear_target(generation)
-                        self._serve_fail_closed(correlation_id)
+                        self._serve_fail_closed(correlation_id, incarnation_id)
                         return 0
                     except Exception as exc:
                         self._store.write(
@@ -759,6 +1128,7 @@ class RuntimeSupervisor:
                                 profile=profile,
                                 tool_surface_hash=tool_surface_hash,
                                 correlation_id=correlation_id,
+                                incarnation_id=incarnation_id,
                                 child=None,
                                 error_code="EXECUTION_WORKER_START_FAILED",
                                 error=redact_text(f"{type(exc).__name__}: {exc}"),
@@ -777,10 +1147,12 @@ class RuntimeSupervisor:
                             profile=profile,
                             tool_surface_hash=tool_surface_hash,
                             correlation_id=correlation_id,
+                            incarnation_id=incarnation_id,
                             child=None,
                             restart_count=restart_count,
                             restarts_total=restarts_total,
                             last_restart_at=last_restart_at,
+                            restart_history_provenance=restart_history_provenance,
                         )
                     )
                     try:
@@ -792,30 +1164,70 @@ class RuntimeSupervisor:
                         )
                     except Exception as exc:
                         restart_count += 1
-                        # Evidence, not policy: unlike restart_count these are never reset,
-                        # so an outage is still visible once health settles again.
-                        restarts_total += 1
-                        last_restart_at = self._clock.now_iso()
+                        attempted_at = self._clock.now_iso()
+                        # Durable across process replacement, unlike the live `RuntimeRecord`:
+                        # this ledger is never subject to the pid-liveness self-heal that clears
+                        # `self._store`'s record, AND the increment itself is atomic and
+                        # idempotent (never lost to an overlapping writer, never double-
+                        # counted by a replay) -- see `record_restart()` (#448 Slice 4).
+                        recorded = self._record_restart_or_fail_closed(
+                            generation=generation,
+                            profile=profile,
+                            tool_surface_hash=tool_surface_hash,
+                            correlation_id=correlation_id,
+                            incarnation_id=incarnation_id,
+                            reason=f"tunnel failed to start: {type(exc).__name__}: {exc}",
+                            restart_count=restart_count,
+                            occurred_at=attempted_at,
+                            # The OLD, confirmed values -- not this attempt's, which the
+                            # ledger write below may fail to durably record (#448 Slice 4).
+                            restarts_total=restarts_total,
+                            last_restart_at=last_restart_at,
+                            restart_history_provenance=restart_history_provenance,
+                        )
+                        if recorded is None:
+                            return 0
+                        restarts_total = recorded.restarts_total
+                        last_restart_at = recorded.last_restart_at
+                        restart_history_provenance = "durable"
                         if restart_count > self._max_restarts:
+                            # Resident fail-closed, not a nonzero exit (#448 Slice 5): a
+                            # `return 2` here is exactly what launchd's
+                            # `KeepAlive: {SuccessfulExit: False, Crashed: True}` relaunches,
+                            # and the fresh incarnation contends for the same
+                            # `runtime-single-instance` lock and can hit this identical
+                            # exhaustion again -- diagnostics and jitter make that loop
+                            # slower, not bounded. Staying resident (via the same
+                            # `_serve_fail_closed` every other fail-closed path already
+                            # uses) means launchd never gets a chance to relaunch at all,
+                            # and `fail_closed_since` makes this durable: if some OTHER
+                            # mechanism ever does relaunch this release,
+                            # `_durable_fail_closed` latches the next incarnation straight
+                            # into fail-closed too, rather than re-attempting the same
+                            # doomed restart cycle.
                             self._store.write(
                                 self._record(
-                                    RuntimePhase.FAILED,
+                                    RuntimePhase.FAIL_CLOSED,
                                     accepted_generation=generation,
                                     active_generation=None,
                                     profile=profile,
                                     tool_surface_hash=tool_surface_hash,
                                     correlation_id=correlation_id,
+                                    incarnation_id=incarnation_id,
                                     child=None,
                                     restart_count=restart_count,
                                     restarts_total=restarts_total,
                                     last_restart_at=last_restart_at,
+                                    restart_history_provenance=restart_history_provenance,
                                     error_code="TUNNEL_START_FAILED",
                                     error=redact_text(f"{type(exc).__name__}: {exc}"),
+                                    fail_closed_since=self._clock.now_iso(),
                                 )
                             )
                             self._clear_target(generation)
-                            return 2
-                        time.sleep(min(4.0, 0.25 * (2 ** (restart_count - 1))))
+                            self._serve_fail_closed(correlation_id, incarnation_id)
+                            return 0
+                        time.sleep(_restart_backoff_seconds(restart_count, jitter=self._jitter))
                         continue
                     self._child = child
                     healthy, health = self._wait_healthy(generation, child)
@@ -823,31 +1235,54 @@ class RuntimeSupervisor:
                         self._tunnel.terminate(child, grace_seconds=3)
                         self._child = None
                         restart_count += 1
-                        # Evidence, not policy: unlike restart_count these are never reset,
-                        # so an outage is still visible once health settles again.
-                        restarts_total += 1
-                        last_restart_at = self._clock.now_iso()
+                        attempted_at = self._clock.now_iso()
+                        # Atomic and idempotent -- see the identical TUNNEL_START_FAILED
+                        # comment above (#448 Slice 4).
+                        recorded = self._record_restart_or_fail_closed(
+                            generation=generation,
+                            profile=profile,
+                            tool_surface_hash=tool_surface_hash,
+                            correlation_id=correlation_id,
+                            incarnation_id=incarnation_id,
+                            reason="tunnel/mcp did not become healthy at startup",
+                            restart_count=restart_count,
+                            occurred_at=attempted_at,
+                            restarts_total=restarts_total,
+                            last_restart_at=last_restart_at,
+                            restart_history_provenance=restart_history_provenance,
+                        )
+                        if recorded is None:
+                            return 0
+                        restarts_total = recorded.restarts_total
+                        last_restart_at = recorded.last_restart_at
+                        restart_history_provenance = "durable"
                         if restart_count > self._max_restarts:
+                            # Resident fail-closed, not a nonzero exit -- see the identical
+                            # TUNNEL_START_FAILED comment above (#448 Slice 5).
                             self._store.write(
                                 self._record(
-                                    RuntimePhase.FAILED,
+                                    RuntimePhase.FAIL_CLOSED,
                                     accepted_generation=generation,
                                     active_generation=None,
                                     profile=profile,
                                     tool_surface_hash=tool_surface_hash,
                                     correlation_id=correlation_id,
+                                    incarnation_id=incarnation_id,
                                     child=None,
                                     restart_count=restart_count,
                                     restarts_total=restarts_total,
                                     last_restart_at=last_restart_at,
+                                    restart_history_provenance=restart_history_provenance,
                                     error_code="STARTUP_HEALTH_FAILED",
                                     error="Tunnel/MCP did not become healthy",
                                     health=health,
+                                    fail_closed_since=self._clock.now_iso(),
                                 )
                             )
                             self._clear_target(generation)
-                            return 2
-                        time.sleep(min(4.0, 0.25 * (2 ** (restart_count - 1))))
+                            self._serve_fail_closed(correlation_id, incarnation_id)
+                            return 0
+                        time.sleep(_restart_backoff_seconds(restart_count, jitter=self._jitter))
                         continue
 
                     previous = self._configs.active()
@@ -868,10 +1303,12 @@ class RuntimeSupervisor:
                                 profile=profile,
                                 tool_surface_hash=tool_surface_hash,
                                 correlation_id=correlation_id,
+                                incarnation_id=incarnation_id,
                                 child=None,
                                 restart_count=restart_count,
                                 restarts_total=restarts_total,
                                 last_restart_at=last_restart_at,
+                                restart_history_provenance=restart_history_provenance,
                                 error_code="ACTIVE_POINTER_COMMIT_FAILED",
                                 error=redact_text(f"{type(exc).__name__}: {exc}"),
                                 health=health,
@@ -887,10 +1324,12 @@ class RuntimeSupervisor:
                             profile=profile,
                             tool_surface_hash=tool_surface_hash,
                             correlation_id=correlation_id,
+                            incarnation_id=incarnation_id,
                             child=child,
                             restart_count=restart_count,
                             restarts_total=restarts_total,
                             last_restart_at=last_restart_at,
+                            restart_history_provenance=restart_history_provenance,
                             health=health,
                         )
                     )
@@ -921,6 +1360,7 @@ class RuntimeSupervisor:
                                     profile=profile,
                                     tool_surface_hash=tool_surface_hash,
                                     correlation_id=correlation_id,
+                                    incarnation_id=incarnation_id,
                                     child=None,
                                     error_code="EXECUTION_WORKER_REGISTRATION_FAILED",
                                     error=redact_text(str(exc)),
@@ -930,7 +1370,7 @@ class RuntimeSupervisor:
                             self._tunnel.terminate(child, grace_seconds=3)
                             self._child = None
                             self._clear_target(generation)
-                            self._serve_fail_closed(correlation_id)
+                            self._serve_fail_closed(correlation_id, incarnation_id)
                             return 0
                         except Exception:
                             # Only pre-spawn failures land here: the adapter converts
@@ -940,7 +1380,26 @@ class RuntimeSupervisor:
                             # swallows a live, untraceable worker.
                             pass
                         observed_ok, observed_health = self._observe_health(generation, child)
-                        current = self._store.read()
+                        # Best-effort (#448 Slice 6 review): this is a status-update read,
+                        # not a decision input -- a failure here must degrade the durable
+                        # record we'd otherwise refresh this iteration, never crash the
+                        # watchdog thread or exit the process.
+                        try:
+                            current = self._store.read()
+                        except Exception:
+                            current = None
+                        # A failing "runtime_state_read" check means the durable store is
+                        # unreadable, NOT that the tunnel child or the service it runs is
+                        # unhealthy (#448 Slice 6 review) -- restarting a genuinely healthy
+                        # child because observability/persistence hiccuped is exactly the
+                        # amplification this distinction exists to prevent. Only a failure
+                        # in some OTHER check may count toward the restart streak or
+                        # terminate the child.
+                        service_ok = all(
+                            ok
+                            for name, ok, _detail in observed_health
+                            if name != _RUNTIME_STATE_READ_CHECK
+                        )
                         if observed_ok:
                             consecutive_health_failures = 0
                             if time.monotonic() - stable_since >= self._stable_health_reset:
@@ -959,11 +1418,33 @@ class RuntimeSupervisor:
                                         restart_count=restart_count,
                                         restarts_total=restarts_total,
                                         last_restart_at=last_restart_at,
+                                        restart_history_provenance=restart_history_provenance,
                                         health=observed_health,
                                         health_observed_at=self._clock.now_iso(),
                                         consecutive_health_failures=0,
                                         last_error_code=None,
                                         last_error=None,
+                                        updated_at=self._clock.now_iso(),
+                                    )
+                                )
+                            continue
+                        if service_ok:
+                            # Observability-only failure: the tunnel child and the
+                            # service it runs are fine, only the durable read failed.
+                            # Degrade the record for visibility, but never touch the
+                            # restart streak and never terminate a healthy child.
+                            if current is not None:
+                                self._store.write(
+                                    replace(
+                                        current,
+                                        phase=RuntimePhase.DEGRADED,
+                                        health=observed_health,
+                                        health_observed_at=self._clock.now_iso(),
+                                        last_error_code="RUNTIME_STATE_READ_FAILED",
+                                        last_error=(
+                                            "Runtime-state read failed during health "
+                                            "observation; the tunnel child itself is healthy"
+                                        ),
                                         updated_at=self._clock.now_iso(),
                                     )
                                 )
@@ -992,29 +1473,56 @@ class RuntimeSupervisor:
                     self._child = None
                     generation = self._adopt_committed_runtime_generation(generation)
                     restart_count += 1
-                    # Evidence, not policy: unlike restart_count these are never reset,
-                    # so an outage is still visible once health settles again.
-                    restarts_total += 1
-                    last_restart_at = self._clock.now_iso()
+                    attempted_at = self._clock.now_iso()
+                    # Atomic and idempotent -- see the identical TUNNEL_START_FAILED
+                    # comment above (#448 Slice 4).
+                    recorded = self._record_restart_or_fail_closed(
+                        generation=generation,
+                        profile=profile,
+                        tool_surface_hash=tool_surface_hash,
+                        correlation_id=correlation_id,
+                        incarnation_id=incarnation_id,
+                        reason="watchdog observed a live but unhealthy tunnel child",
+                        restart_count=restart_count,
+                        occurred_at=attempted_at,
+                        restarts_total=restarts_total,
+                        last_restart_at=last_restart_at,
+                        restart_history_provenance=restart_history_provenance,
+                    )
+                    if recorded is None:
+                        return 0
+                    restarts_total = recorded.restarts_total
+                    last_restart_at = recorded.last_restart_at
+                    restart_history_provenance = "durable"
                     if restart_count > self._max_restarts:
+                        # Resident fail-closed, not a nonzero exit -- see the identical
+                        # TUNNEL_START_FAILED comment above (#448 Slice 5). This is the
+                        # exact Signature A/B chain #448 was opened for: a remote outage
+                        # exhausting the tunnel-child restart budget used to `return 2`
+                        # here, which is precisely what let launchd's `KeepAlive` turn one
+                        # remote 5xx episode into an unbounded respawn loop.
                         self._store.write(
                             self._record(
-                                RuntimePhase.FAILED,
+                                RuntimePhase.FAIL_CLOSED,
                                 accepted_generation=generation,
                                 active_generation=generation,
                                 profile=profile,
                                 tool_surface_hash=tool_surface_hash,
                                 correlation_id=correlation_id,
+                                incarnation_id=incarnation_id,
                                 child=None,
                                 restart_count=restart_count,
                                 restarts_total=restarts_total,
                                 last_restart_at=last_restart_at,
+                                restart_history_provenance=restart_history_provenance,
                                 error_code="RESTART_LIMIT",
                                 error="Tunnel child exceeded bounded restart policy",
+                                fail_closed_since=self._clock.now_iso(),
                             )
                         )
                         self._clear_target(generation)
-                        return 2
+                        self._serve_fail_closed(correlation_id, incarnation_id)
+                        return 0
                     try:
                         doctor_ok, doctor_detail = self._tunnel.doctor(profile, env=environment)
                     except Exception as exc:
@@ -1031,28 +1539,38 @@ class RuntimeSupervisor:
                                 profile=profile,
                                 tool_surface_hash=tool_surface_hash,
                                 correlation_id=correlation_id,
+                                incarnation_id=incarnation_id,
                                 child=None,
                                 restart_count=restart_count,
                                 restarts_total=restarts_total,
                                 last_restart_at=last_restart_at,
+                                restart_history_provenance=restart_history_provenance,
                                 error_code="NON_RETRYABLE_DOCTOR_FAILURE",
                                 error=redact_text(doctor_detail),
                             )
                         )
                         self._clear_target(generation)
                         return 2
-                    time.sleep(min(4.0, 0.25 * (2 ** (restart_count - 1))))
+                    time.sleep(_restart_backoff_seconds(restart_count, jitter=self._jitter))
 
-                current = self._store.read()
+                # Best-effort (#448 Slice 6 review): a graceful shutdown must persist
+                # cleanly through a healthy exit even if the store happens to be
+                # unreadable at this exact moment -- never crash into the top-level
+                # handler's `return 2` over a transition write that is advisory anyway.
+                try:
+                    current = self._store.read()
+                except Exception:
+                    current = None
                 if current and current.phase not in {RuntimePhase.STOPPED, RuntimePhase.FAILED}:
-                    self._store.write(
-                        transition(
-                            current,
-                            RuntimePhase.STOPPING,
-                            updated_at=self._clock.now_iso(),
-                            correlation_id=correlation_id,
+                    with contextlib.suppress(Exception):
+                        self._store.write(
+                            transition(
+                                current,
+                                RuntimePhase.STOPPING,
+                                updated_at=self._clock.now_iso(),
+                                correlation_id=correlation_id,
+                            )
                         )
-                    )
                 if self._child and self._tunnel.is_alive(self._child):
                     self._tunnel.terminate(self._child, grace_seconds=15)
                 self._child = None
@@ -1064,20 +1582,27 @@ class RuntimeSupervisor:
                     self._execution_worker.terminate(self._execution_child, grace_seconds=15)
                 self._execution_child = None
                 self._execution_generation = None
-                current = self._store.read()
+                # Same best-effort disposition as the STOPPING read above -- the
+                # process is exiting cleanly regardless of whether this final durable
+                # write succeeds.
+                try:
+                    current = self._store.read()
+                except Exception:
+                    current = None
                 if current:
-                    self._store.write(
-                        replace(
-                            current,
-                            phase=RuntimePhase.STOPPED,
-                            pid=None,
-                            process_identity=None,
-                            child_pid=None,
-                            child_process_identity=None,
-                            active_generation=None,
-                            updated_at=self._clock.now_iso(),
+                    with contextlib.suppress(Exception):
+                        self._store.write(
+                            replace(
+                                current,
+                                phase=RuntimePhase.STOPPED,
+                                pid=None,
+                                process_identity=None,
+                                child_pid=None,
+                                child_process_identity=None,
+                                active_generation=None,
+                                updated_at=self._clock.now_iso(),
+                            )
                         )
-                    )
                 return 0
             except Exception as exc:
                 if self._child and self._tunnel.is_alive(self._child):
@@ -1100,10 +1625,12 @@ class RuntimeSupervisor:
                             profile=profile,
                             tool_surface_hash=tool_surface_hash,
                             correlation_id=correlation_id,
+                            incarnation_id=incarnation_id,
                             child=None,
                             restart_count=restart_count,
                             restarts_total=restarts_total,
                             last_restart_at=last_restart_at,
+                            restart_history_provenance=restart_history_provenance,
                             error_code="SUPERVISOR_FAILURE",
                             error=redact_text(f"{type(exc).__name__}: {exc}"),
                         )

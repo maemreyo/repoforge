@@ -2266,6 +2266,9 @@ def run_runtime_worker(
     root = configs.root
     supervisor = RuntimeSupervisor(
         store=build_runtime_store(root / "managed-runtime-v3.json"),
+        restart_history=build_restart_history_store(
+            root / "managed-runtime-restart-history-v1.json"
+        ),
         configs=configs,
         locks=build_lock_manager(),
         control=build_runtime_control_server(root / "supervisor.sock"),

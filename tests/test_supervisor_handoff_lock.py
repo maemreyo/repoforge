@@ -28,6 +28,68 @@ from repoforge.domain.errors import ConfigError
 from repoforge.domain.runtime import ChildProcess, ControlResponse, RuntimeRecord, TunnelProfile
 from repoforge.testing import FixedClock, SequenceIdGenerator
 
+
+class _NullRestartHistory:
+    """In-memory fake: durable restart-history ledger (#448 Slice 4).
+
+    Most tests here don't exercise restart-history semantics directly, so this
+    just reflects whatever was last written -- `None` until then, like a fresh
+    install with no ledger yet.
+    """
+
+    def __init__(self) -> None:
+        self.record: object | None = None
+
+    def read(self) -> object | None:
+        return self.record
+
+    def write(self, record: object) -> None:
+        self.record = record
+
+    def record_restart(
+        self, *, incarnation_id: str, reason: str | None, occurred_at: str, event_id: str
+    ) -> object:
+        from repoforge.domain.runtime import RestartHistoryRecord
+
+        current = self.record
+        if current is not None and getattr(current, "last_event_id", None) == event_id:
+            return current
+        self.record = RestartHistoryRecord(
+            protocol_version=1,
+            restarts_total=(getattr(current, "restarts_total", 0) if current is not None else 0)
+            + 1,
+            last_restart_at=occurred_at,
+            incarnation_id=incarnation_id,
+            updated_at=occurred_at,
+            last_event_id=event_id,
+            last_restart_reason=reason,
+            provenance="durable",
+        )
+        return self.record
+
+    def seed_if_missing(
+        self,
+        *,
+        restarts_total: int,
+        last_restart_at: str | None,
+        incarnation_id: str,
+        occurred_at: str,
+    ) -> object:
+        from repoforge.domain.runtime import RestartHistoryRecord
+
+        if self.record is not None:
+            return self.record
+        self.record = RestartHistoryRecord(
+            protocol_version=1,
+            restarts_total=max(0, restarts_total),
+            last_restart_at=last_restart_at,
+            incarnation_id=incarnation_id,
+            updated_at=occurred_at,
+            provenance="legacy_runtime_record",
+        )
+        return self.record
+
+
 _GENERATION = 2
 
 
@@ -80,6 +142,9 @@ class _Runtime:
 
     def clear(self, *, expected_pid: int | None = None) -> None:
         self.record = None
+
+    def peek_restart_evidence(self) -> tuple[int, str | None] | None:
+        return None
 
 
 class _Server:
@@ -162,6 +227,7 @@ def _supervisor(
     )
     supervisor = RuntimeSupervisor(
         store=runtime,
+        restart_history=_NullRestartHistory(),
         configs=_Configs(),
         locks=locks,
         control=_Server(),
@@ -240,6 +306,43 @@ def test_a_lock_that_is_never_released_is_a_typed_handoff_timeout(tmp_path: Path
 
     # The refused supervisor must not have touched runtime state owned by the incumbent.
     assert runtime.record is None
+
+
+def test_a_still_alive_holder_is_diagnosed_as_a_handoff_not_a_stuck_lock(
+    tmp_path: Path,
+) -> None:
+    """A fast respawn racing a still-shutting-down prior instance (#448 Slice 5).
+
+    The holder in this scenario is genuinely alive throughout -- exactly the shape of a
+    real handoff, not a stuck/stale lock -- so the diagnostic must say so explicitly
+    rather than the generic "holder unknown" a dead or unreadable lock file would get.
+    The same failure must also be appended to the runtime log as a structured event: the
+    refused incarnation's own `RuntimeRecord` write is correctly skipped (see the test
+    above), so the log is the only place this evidence can appear for `rf runtime
+    status`/an operator to find, other than a raw stderr traceback.
+    """
+    locks = FcntlLockManager(tmp_path / "locks")
+    supervisor, runtime, _ = _supervisor(tmp_path, locks, wait_seconds=0.2)
+    log_path = tmp_path / "runtime.log"
+
+    with locks.lock("runtime-single-instance", timeout_seconds=5.0, metadata={"role": "outgoing"}):
+        with pytest.raises(ConfigError, match="RUNTIME_SUPERVISOR_HANDOFF_TIMEOUT") as raised:
+            _run(supervisor)
+        assert "is still alive" in str(raised.value)
+        assert "shutting down" in str(raised.value)
+
+    assert runtime.record is None
+
+    lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert lines, "the handoff timeout left no evidence in the runtime log"
+    events = [json.loads(line) for line in lines]
+    handoff_events = [event for event in events if event.get("event_kind") == "handoff_timeout"]
+    assert len(handoff_events) == 1, events
+    event = handoff_events[0]
+    assert event["component"] == "supervisor"
+    assert event["level"] == "ERROR"
+    assert "RUNTIME_SUPERVISOR_HANDOFF_TIMEOUT" in event["message"]
+    assert "is still alive" in event["message"]
 
 
 def test_an_uncontended_start_still_takes_the_lock_and_serves(tmp_path: Path) -> None:

@@ -55,6 +55,67 @@ from repoforge.domain.workspace import WorkspaceRecord
 from repoforge.testing import FixedClock, SequenceIdGenerator
 
 
+class _NullRestartHistory:
+    """In-memory fake: durable restart-history ledger (#448 Slice 4).
+
+    Most tests here don't exercise restart-history semantics directly, so this
+    just reflects whatever was last written -- `None` until then, like a fresh
+    install with no ledger yet.
+    """
+
+    def __init__(self) -> None:
+        self.record: object | None = None
+
+    def read(self) -> object | None:
+        return self.record
+
+    def write(self, record: object) -> None:
+        self.record = record
+
+    def record_restart(
+        self, *, incarnation_id: str, reason: str | None, occurred_at: str, event_id: str
+    ) -> object:
+        from repoforge.domain.runtime import RestartHistoryRecord
+
+        current = self.record
+        if current is not None and getattr(current, "last_event_id", None) == event_id:
+            return current
+        self.record = RestartHistoryRecord(
+            protocol_version=1,
+            restarts_total=(getattr(current, "restarts_total", 0) if current is not None else 0)
+            + 1,
+            last_restart_at=occurred_at,
+            incarnation_id=incarnation_id,
+            updated_at=occurred_at,
+            last_event_id=event_id,
+            last_restart_reason=reason,
+            provenance="durable",
+        )
+        return self.record
+
+    def seed_if_missing(
+        self,
+        *,
+        restarts_total: int,
+        last_restart_at: str | None,
+        incarnation_id: str,
+        occurred_at: str,
+    ) -> object:
+        from repoforge.domain.runtime import RestartHistoryRecord
+
+        if self.record is not None:
+            return self.record
+        self.record = RestartHistoryRecord(
+            protocol_version=1,
+            restarts_total=max(0, restarts_total),
+            last_restart_at=last_restart_at,
+            incarnation_id=incarnation_id,
+            updated_at=occurred_at,
+            provenance="legacy_runtime_record",
+        )
+        return self.record
+
+
 class Service:
     def __init__(self, value: str) -> None:
         self.value = value
@@ -725,6 +786,9 @@ class Runtime:
 
     def clear(self, *, expected_pid=None):
         self.record = None
+
+    def peek_restart_evidence(self):
+        return None
 
 
 class ReloadControl:
@@ -1758,6 +1822,9 @@ def test_supervisor_restarts_latest_hot_reloaded_generation_after_child_crash(
             del expected_pid
             self.record = None
 
+        def peek_restart_evidence(self) -> tuple[int, str | None] | None:
+            return None
+
     runtime_path = tmp_path / "mcp-runtime.json"
 
     def write_mcp_generation(generation: int) -> None:
@@ -1829,6 +1896,7 @@ def test_supervisor_restarts_latest_hot_reloaded_generation_after_child_crash(
     tunnel = Tunnel()
     supervisor = RuntimeSupervisor(
         store=runtime,  # type: ignore[arg-type]
+        restart_history=_NullRestartHistory(),  # type: ignore[arg-type]
         configs=configs,  # type: ignore[arg-type]
         locks=Locks(),  # type: ignore[arg-type]
         control=Server(),  # type: ignore[arg-type]

@@ -26,6 +26,68 @@ from repoforge.domain.runtime import (
 )
 from repoforge.testing import FixedClock, SequenceIdGenerator
 
+
+class _NullRestartHistory:
+    """In-memory fake: durable restart-history ledger (#448 Slice 4).
+
+    Most tests here don't exercise restart-history semantics directly, so this
+    just reflects whatever was last written -- `None` until then, like a fresh
+    install with no ledger yet.
+    """
+
+    def __init__(self) -> None:
+        self.record: object | None = None
+
+    def read(self) -> object | None:
+        return self.record
+
+    def write(self, record: object) -> None:
+        self.record = record
+
+    def record_restart(
+        self, *, incarnation_id: str, reason: str | None, occurred_at: str, event_id: str
+    ) -> object:
+        from repoforge.domain.runtime import RestartHistoryRecord
+
+        current = self.record
+        if current is not None and getattr(current, "last_event_id", None) == event_id:
+            return current
+        self.record = RestartHistoryRecord(
+            protocol_version=1,
+            restarts_total=(getattr(current, "restarts_total", 0) if current is not None else 0)
+            + 1,
+            last_restart_at=occurred_at,
+            incarnation_id=incarnation_id,
+            updated_at=occurred_at,
+            last_event_id=event_id,
+            last_restart_reason=reason,
+            provenance="durable",
+        )
+        return self.record
+
+    def seed_if_missing(
+        self,
+        *,
+        restarts_total: int,
+        last_restart_at: str | None,
+        incarnation_id: str,
+        occurred_at: str,
+    ) -> object:
+        from repoforge.domain.runtime import RestartHistoryRecord
+
+        if self.record is not None:
+            return self.record
+        self.record = RestartHistoryRecord(
+            protocol_version=1,
+            restarts_total=max(0, restarts_total),
+            last_restart_at=last_restart_at,
+            incarnation_id=incarnation_id,
+            updated_at=occurred_at,
+            provenance="legacy_runtime_record",
+        )
+        return self.record
+
+
 _PROFILE = TunnelProfile("a" * 64, "repoforge", "tunnel-client", "1.0", ("rf", "serve"))
 _SHA = "0123abc"
 
@@ -93,6 +155,9 @@ class _Store:
     def write(self, record: RuntimeRecord) -> None:
         self.record = record
         self.writes.append(record)
+
+    def peek_restart_evidence(self) -> tuple[int, str | None] | None:
+        return None
 
 
 class _Configs:
@@ -165,6 +230,7 @@ def _supervisor(
     server = _Server()
     supervisor = RuntimeSupervisor(
         store=store,
+        restart_history=_NullRestartHistory(),
         configs=_Configs(),
         locks=_Locks(),
         control=server,
@@ -309,6 +375,7 @@ def test_reconciliation_blocker_code_is_recorded_in_fail_closed(tmp_path: Path) 
     server = _Server()
     supervisor = RuntimeSupervisor(
         store=store,
+        restart_history=_NullRestartHistory(),
         configs=_Configs(),
         locks=_Locks(),
         control=server,
@@ -561,6 +628,7 @@ def test_watchdog_registration_failure_fails_closed(tmp_path: Path) -> None:
     server = _Server()
     supervisor = RuntimeSupervisor(
         store=store,
+        restart_history=_NullRestartHistory(),
         configs=_HealthyConfigs(),
         locks=_Locks(),
         control=server,
