@@ -4392,6 +4392,7 @@
     "tests/test_onboarding_real_git.py",
     "tests/test_phase4_runtime_control.py",
     "tests/test_phase7_regressions.py",
+    "tests/test_unix_control_bounded_concurrency.py",
     "tests/test_unix_socket_path_portability.py"
   ],
   "src/repoforge/adapters/subprocess/auth_runner.py": [
