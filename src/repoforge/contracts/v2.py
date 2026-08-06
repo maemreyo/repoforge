@@ -1499,10 +1499,13 @@ _Selector = _SelectorItem | _SelectorItems
 
 # An ad-hoc argv is bounded far more tightly than a selector, and the schema must say
 # so: advertising a selector's 100x4096 here let a caller build a request the schema
-# accepted and `domain.adhoc` then rejected, which reads as an arbitrary failure. These
-# must equal MAX_ADHOC_ARGV_ELEMENTS and MAX_ADHOC_ARGV_ELEMENT_LENGTH; the contracts
-# package deliberately imports no domain module, so a test pins the two together.
-_MAX_ADHOC_ARGV_ELEMENTS = 32
+# accepted and `domain.adhoc` then rejected, which reads as an arbitrary failure. The
+# element-count cap is 100 -- matching the documented collection bound and
+# CommandEvidence.argv -- but each element stays 512 characters, far tighter than a
+# selector item's 4096. These must equal MAX_ADHOC_ARGV_ELEMENTS and
+# MAX_ADHOC_ARGV_ELEMENT_LENGTH; the contracts package deliberately imports no domain
+# module, so a test pins the two together.
+_MAX_ADHOC_ARGV_ELEMENTS = 100
 _MAX_ADHOC_ARGV_ELEMENT_LENGTH = 512
 _MAX_ADHOC_STDIN_LENGTH = 64_000
 # These must equal domain.adhoc's MAX_ADHOC_SCRIPT_LENGTH and MAX_ADHOC_SEQUENCE_LENGTH,

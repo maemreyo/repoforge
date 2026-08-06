@@ -27,7 +27,7 @@ import pytest
 from conftest import ForgeEnvironment, create_forge_environment, durable_worker
 
 from repoforge.contracts.v2 import WorkspaceExecInput
-from repoforge.domain.adhoc import MAX_ADHOC_STDIN_LENGTH
+from repoforge.domain.adhoc import MAX_ADHOC_ARGV_ELEMENTS, MAX_ADHOC_STDIN_LENGTH
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 
 
@@ -165,7 +165,7 @@ def test_disallowed_runner_yields_structured_error(tmp_path: Path) -> None:
 def test_argv_over_bound_is_rejected(tmp_path: Path) -> None:
     env = _relaxed_env(tmp_path)
     workspace_id = env.service.workspace_create("demo", "argv too long")["workspace_id"]
-    argv = ("python3", *[f"--flag{i}" for i in range(40)])
+    argv = ("python3", *[f"--flag{i}" for i in range(MAX_ADHOC_ARGV_ELEMENTS + 1)])
     with pytest.raises(RepoForgeError) as exc:
         _exec(env, workspace_id, argv)
     assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID
