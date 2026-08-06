@@ -4,6 +4,7 @@ import hashlib
 
 import pytest
 
+from repoforge.adapters.codegraph.config import CodeGraphOptions
 from repoforge.domain.provider_manifest import (
     ConfidenceModel,
     CoverageModel,
@@ -31,6 +32,7 @@ def _executable_manifest(
     filesystem: ProviderFilesystemRequirement | None = None,
     output_bounds: ProviderOutputBounds | None = None,
     fallback_provider_id: str = "",
+    codegraph: CodeGraphOptions | None = None,
 ) -> ProviderManifest:
     return ProviderManifest(
         provider_id=provider_id,
@@ -46,6 +48,7 @@ def _executable_manifest(
         filesystem=filesystem or ProviderFilesystemRequirement(),
         output_bounds=output_bounds or ProviderOutputBounds(),
         fallback_provider_id=fallback_provider_id,
+        codegraph=codegraph,
     )
 
 
@@ -168,3 +171,69 @@ def test_full_manifest_preserves_advisory_contracts() -> None:
 
     assert manifest.health_probe_arguments == ("--version",)
     assert manifest.fallback_provider_id == "fallback-analyzer"
+
+
+def test_codegraph_options_have_stable_defaults_and_digest() -> None:
+    first = CodeGraphOptions()
+    second = CodeGraphOptions()
+
+    assert first.init_timeout_seconds == 120
+    assert first.sync_timeout_seconds == 60
+    assert first.query_timeout_seconds == 15
+    assert first.max_changed_paths == 256
+    assert first.max_relationships == 1_000
+    assert first.max_affected_paths == 1_000
+    assert first.max_depth == 5
+    assert first.projection_max_files == 20_000
+    assert first.projection_max_bytes == 250_000_000
+    assert first.canary_timeout_seconds == 180
+    assert first.options_digest == second.options_digest
+    assert len(first.options_digest) == 64
+
+
+def test_manifest_accepts_valid_codegraph_enrollment_and_hashes_options() -> None:
+    base_options = CodeGraphOptions()
+    tuned_options = CodeGraphOptions(query_timeout_seconds=30)
+    first = _executable_manifest(
+        supported_capabilities=("semantic_graph",),
+        filesystem=ProviderFilesystemRequirement(capability="managed_state_write"),
+        codegraph=base_options,
+    )
+    second = _executable_manifest(
+        supported_capabilities=("semantic_graph",),
+        filesystem=ProviderFilesystemRequirement(capability="managed_state_write"),
+        codegraph=tuned_options,
+    )
+
+    assert first.codegraph is base_options
+    assert first.manifest_hash != second.manifest_hash
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"kind": ProviderKind.CODE_INTELLIGENCE},
+        {"runtime": ProviderImageIdentity("example.invalid/codegraph", "b" * 64)},
+        {"supported_capabilities": ("lint",)},
+        {"network_policy": "restricted"},
+        {"filesystem": ProviderFilesystemRequirement(capability="read")},
+        {"fallback_provider_id": "fallback-analyzer"},
+    ],
+)
+def test_manifest_rejects_incompatible_codegraph_enrollment(
+    overrides: dict[str, object],
+) -> None:
+    values: dict[str, object] = {
+        "provider_id": "codegraph",
+        "kind": ProviderKind.ANALYZER,
+        "version": "1.5.0",
+        "runtime": ProviderExecutableIdentity("/opt/codegraph", "a" * 64),
+        "supported_capabilities": ("semantic_graph",),
+        "network_policy": "none",
+        "filesystem": ProviderFilesystemRequirement(capability="managed_state_write"),
+        "codegraph": CodeGraphOptions(),
+    }
+    values.update(overrides)
+
+    with pytest.raises(ValueError, match="CodeGraph"):
+        ProviderManifest(**values)  # type: ignore[arg-type]

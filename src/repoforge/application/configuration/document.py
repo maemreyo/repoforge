@@ -362,11 +362,13 @@ def render_resolved(
             if not isinstance(provider, dict):
                 continue
             lines.extend(["", "[[providers]]"])
-            for key in sorted(k for k in provider if k not in {"filesystem", "output_bounds"}):
+            for key in sorted(
+                k for k in provider if k not in {"codegraph", "filesystem", "output_bounds"}
+            ):
                 value = provider[key]
                 if isinstance(value, (str, int, bool, list)):
                     lines.append(f"{key} = {_toml(value)}")
-            for section in ("filesystem", "output_bounds"):
+            for section in ("filesystem", "output_bounds", "codegraph"):
                 values = provider.get(section)
                 if not isinstance(values, dict):
                     continue

@@ -143,6 +143,7 @@ git commit -m "feat(code-intelligence): add semantic graph contract"
 **Files:**
 - Create: `src/repoforge/adapters/codegraph/__init__.py`
 - Create: `src/repoforge/adapters/codegraph/config.py`
+- Create: `src/repoforge/domain/codegraph_config.py`
 - Modify: `src/repoforge/domain/provider_manifest.py`
 - Modify: `src/repoforge/domain/provider_config.py`
 - Modify: `src/repoforge/config.py`
@@ -154,17 +155,19 @@ git commit -m "feat(code-intelligence): add semantic graph contract"
 - Produces: `CodeGraphOptions`, `ProviderManifest.codegraph`, `RepositoryConfig.code_intelligence_provider_id`.
 - Consumes: existing provider manifest runtime digest, version, capability, filesystem, network, and output bounds.
 
-- [ ] **Step 1: Write failing parser and validation tests**
+`CodeGraphOptions` and its strict parser are defined in the domain module so `ProviderManifest` and the existing provider-config parser do not import an adapter. The adapter config module re-exports the reviewed surface for later CodeGraph runtime modules.
+
+- [x] **Step 1: Write failing parser and validation tests**
 
 Test exact defaults and ranges, reject `[providers.codegraph]` unless kind is `analyzer`, runtime is executable, capability includes `semantic_graph`, network is `none`, and filesystem capability is `managed_state_write`. Test repository default `""` and exact provider-id parsing.
 
-- [ ] **Step 2: Run focused tests and prove RED**
+- [x] **Step 2: Run focused tests and prove RED**
 
 Run: `pytest tests/test_provider_config.py tests/test_provider_manifest.py -q`
 
 Expected: FAIL because nested CodeGraph options are not parsed.
 
-- [ ] **Step 3: Implement bounded options**
+- [x] **Step 3: Implement bounded options**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -183,19 +186,21 @@ class CodeGraphOptions:
 
 Expose a canonical `options_digest` computed from sorted JSON.
 
-- [ ] **Step 4: Parse and bind one enrollment**
+- [x] **Step 4: Parse and bind one enrollment**
 
 Extend `ProviderManifest` with `codegraph: CodeGraphOptions | None`; include its digest in `manifest_hash`. Add `RepositoryConfig.code_intelligence_provider_id: str = ""` and parse it without environment expansion.
 
-- [ ] **Step 5: Preserve nested tables in resolved config**
+- [x] **Step 5: Preserve nested tables in resolved config**
 
 Ensure `render_resolved` recursively emits `[providers.codegraph]` and does not flatten or drop it.
 
-- [ ] **Step 6: Run focused tests and commit**
+- [x] **Step 6: Run focused tests and commit**
 
 Run: `pytest tests/test_provider_config.py tests/test_provider_manifest.py -q`
 
 Commit: `feat(codegraph): add reviewed enrollment configuration`
+
+Evidence: focused RED failed on the absent adapter/config binding; focused GREEN passed 48 tests, the broader provider/config regression set passed 72 tests, and the fail-closed `test` profile completed successfully.
 
 ### Task 3: Snapshot projection and invalidation
 
