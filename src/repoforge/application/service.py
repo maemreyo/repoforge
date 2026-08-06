@@ -26,6 +26,7 @@ from .operations.cancel import OperationCancelCommand, OperationCancellationRequ
 from .operations.composite import OperationCommand, OperationCoordinator
 from .operations.list import OperationListCommand, OperationLister
 from .operations.recovery import reap_running_background
+from .operations.repair import OperationRepairCommand, OperationRepairService
 from .operations.status import OperationStatusCommand, OperationStatusReader
 from .operations.work_admission import DurableWorkAdmission
 from .read_batch import FileReadRequest
@@ -377,6 +378,14 @@ class CodingService:
             ctx.reaper,
             request_live_cancel=self._request_live_operation_cancel,
         )
+        if ctx.operation_work_queue is None or ctx.worker_bindings is None or ctx.reaper is None:
+            raise RuntimeError("Operation repair dependencies are not configured")
+        self._operation_repair = OperationRepairService(
+            self.operations,
+            ctx.operation_work_queue,
+            ctx.worker_bindings,
+            ctx.reaper,
+        )
         self._repo_list = RepositoryLister(ctx)
         self._repo_status = RepositoryStatusReader(ctx)
         self._repo_context = RepositoryContextReader(ctx)
@@ -597,6 +606,23 @@ class CodingService:
         if result.cancellation_requested:
             self._request_live_operation_cancel(result.operation.kind, operation_id)
         return _result(result)
+
+    def operation_repair(
+        self,
+        action: str,
+        operation_id: str,
+        proposal_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Preview or apply an exact-state operator repair outside the MCP tool surface."""
+        return _result(
+            self._operation_repair.execute(
+                OperationRepairCommand(
+                    action=action,
+                    operation_id=operation_id,
+                    proposal_token=proposal_token,
+                )
+            )
+        )
 
     def failure_evidence_read(self, failure_id: str) -> dict[str, Any]:
         return _result(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import platform
 import sys
 import threading
@@ -31,7 +32,8 @@ from ...domain.execution_receipt import (
     create_stage_receipt,
     receipt_payload,
 )
-from ...domain.operation_task import OperationRetryability
+from ...domain.operation_task import OperationRetryability, OperationState
+from ...domain.operation_worker import OperationWorkerBinding
 from ...domain.verification_dag import (
     CacheMissReason,
     CachePolicy,
@@ -361,6 +363,71 @@ class WorkspacePlanExecutor:
             network_policy=dag_stage.network_policy,
             dependency_receipt_hashes=dependency_hashes,
         )
+
+    def _durable_stage_token(self, operation_id: str) -> CancellationToken:
+        """Create a launch-gated token whose active stage child is durably recoverable."""
+        bindings = self.ctx.worker_bindings
+        reaper = self.ctx.reaper
+        if bindings is None or reaper is None:
+            raise RepoForgeError(
+                "Plan-stage durable child containment is not configured",
+                code=ErrorCode.CONFIG_INVALID,
+            )
+        active_binding: list[OperationWorkerBinding] = []
+        token: CancellationToken
+
+        def before_spawn() -> None:
+            self._check_cancelled(operation_id, token)
+            task = self.operations.status(operation_id)
+            if task.state is not OperationState.RUNNING:
+                raise RepoForgeError(
+                    "Plan operation is no longer running at the child spawn boundary",
+                    code=ErrorCode.OPERATION_STALE,
+                )
+
+        def bind_child(child_pid: int) -> None:
+            task = self.operations.status(operation_id)
+            if task.state is not OperationState.RUNNING:
+                raise RepoForgeError(
+                    "Plan operation changed before child identity could be bound",
+                    code=ErrorCode.OPERATION_STALE,
+                )
+            child_token = reaper.read_start_token(child_pid)
+            server_pid = os.getpid()
+            server_token = reaper.read_start_token(server_pid)
+            if child_token is None or server_token is None:
+                raise RepoForgeError(
+                    "Could not establish PID-reuse-safe plan-stage child identity",
+                    code=ErrorCode.STATE_INVALID,
+                )
+            binding = OperationWorkerBinding(
+                operation_id=operation_id,
+                child_pid=child_pid,
+                child_pgid=child_pid,
+                child_start_token=child_token,
+                server_pid=server_pid,
+                server_start_token=server_token,
+                created_at=self.ctx.clock.now_iso(),
+                owner_generation=self.ctx.config_generation or None,
+                owner_id=task.owner_id,
+                attempt=task.attempt or None,
+            )
+            bindings.put(binding)
+            active_binding[:] = [binding]
+
+        def release_child() -> None:
+            for binding in tuple(active_binding):
+                bindings.delete_if_unchanged(binding)
+            active_binding.clear()
+
+        token = CancellationToken(
+            on_spawn=before_spawn,
+            raise_on_spawn_error=True,
+            on_bind=bind_child,
+            raise_on_bind_error=True,
+            on_release=release_child,
+        )
+        return token
 
     def _register_token(self, operation_id: str, token: CancellationToken) -> None:
         with self._tokens_lock:
@@ -743,7 +810,7 @@ class WorkspacePlanExecutor:
         )
         task = self.operations.start(task.operation_id, now=self.ctx.clock.now_iso())
         operation_id = task.operation_id
-        token = CancellationToken()
+        token = self._durable_stage_token(operation_id)
         self._register_token(operation_id, token)
 
         def run() -> None:

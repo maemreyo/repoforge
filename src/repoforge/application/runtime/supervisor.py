@@ -32,7 +32,7 @@ from ...domain.runtime import (
 )
 from ...ports.clock import Clock
 from ...ports.configuration import ConfigurationStore
-from ...ports.execution_worker import ExecutionWorkerClient
+from ...ports.execution_worker import ExecutionWorkerClient, ExecutionWorkerProgressHealth
 from ...ports.ids import IdGenerator
 from ...ports.locking import LockManager
 from ...ports.process import ProcessInspector
@@ -79,6 +79,7 @@ class RuntimeSupervisor:
         watchdog_interval_seconds: float = 2.0,
         health_failure_threshold: int = 3,
         stable_health_reset_seconds: float = 60.0,
+        execution_worker_stale_seconds: float = 45.0,
         single_instance_wait_seconds: float = 45.0,
         preflight: Callable[[], None] | None = None,
         worker_reconciler: ExecutionWorkerReconciler | None = None,
@@ -105,6 +106,7 @@ class RuntimeSupervisor:
             or watchdog_interval_seconds <= 0
             or health_failure_threshold <= 0
             or stable_health_reset_seconds <= 0
+            or execution_worker_stale_seconds <= 0
             or single_instance_wait_seconds < 0
         ):
             raise ValueError("Runtime health and restart bounds must be positive")
@@ -114,12 +116,64 @@ class RuntimeSupervisor:
         self._watchdog_interval = watchdog_interval_seconds
         self._health_failure_threshold = health_failure_threshold
         self._stable_health_reset = stable_health_reset_seconds
+        self._execution_worker_stale = execution_worker_stale_seconds
         self._preflight = preflight
         self._worker_reconciler = worker_reconciler
         self._stop = threading.Event()
         self._child: ChildProcess | None = None
         self._execution_child: ChildProcess | None = None
         self._execution_generation: int | None = None
+
+    def _execution_worker_progress(
+        self,
+        child: ChildProcess,
+        *,
+        process_alive: bool | None = None,
+    ) -> ExecutionWorkerProgressHealth:
+        worker = self._execution_worker
+        if worker is None:
+            return ExecutionWorkerProgressHealth(
+                process_alive=False,
+                heartbeat_available=False,
+                heartbeat_age_seconds=None,
+                progress_healthy=False,
+                loop_state=None,
+                current_operation_id=None,
+                detail="isolated execution worker is not configured",
+            )
+        probe = getattr(worker, "progress_health", None)
+        if not callable(probe):
+            alive = process_alive if process_alive is not None else worker.is_alive(child)
+            return ExecutionWorkerProgressHealth(
+                process_alive=alive,
+                heartbeat_available=False,
+                heartbeat_age_seconds=None,
+                progress_healthy=alive,
+                loop_state=None,
+                current_operation_id=None,
+                detail=(
+                    "execution worker progress probe is unavailable; process is alive"
+                    if alive
+                    else "isolated execution worker exited"
+                ),
+            )
+        observed: object = probe(
+            child,
+            now=self._clock.now_iso(),
+            stale_after_seconds=self._execution_worker_stale,
+        )
+        if not isinstance(observed, ExecutionWorkerProgressHealth):
+            alive = process_alive if process_alive is not None else worker.is_alive(child)
+            return ExecutionWorkerProgressHealth(
+                process_alive=alive,
+                heartbeat_available=False,
+                heartbeat_age_seconds=None,
+                progress_healthy=False,
+                loop_state=None,
+                current_operation_id=None,
+                detail="execution worker progress probe returned an invalid result",
+            )
+        return observed
 
     def _ensure_execution_worker(
         self,
@@ -132,13 +186,12 @@ class RuntimeSupervisor:
             return
         assert self._execution_worker_log_path is not None
         child = self._execution_child
-        if (
-            child is not None
-            and self._execution_generation == generation
-            and self._execution_worker.is_alive(child)
-        ):
-            return
-        if child is not None and self._execution_worker.is_alive(child):
+        child_alive = bool(child is not None and self._execution_worker.is_alive(child))
+        if child is not None and self._execution_generation == generation and child_alive:
+            if self._execution_worker_progress(child, process_alive=True).progress_healthy:
+                return
+            self._execution_worker.terminate(child, grace_seconds=3)
+        elif child is not None and child_alive:
             self._execution_worker.terminate(child, grace_seconds=3)
         self._execution_child = None
         self._execution_generation = None
@@ -355,6 +408,29 @@ class RuntimeSupervisor:
                         if worker_alive
                         else "isolated execution worker exited"
                     ),
+                )
+            )
+            progress = (
+                self._execution_worker_progress(
+                    self._execution_child,
+                    process_alive=worker_alive,
+                )
+                if worker_alive and self._execution_child is not None
+                else ExecutionWorkerProgressHealth(
+                    process_alive=False,
+                    heartbeat_available=False,
+                    heartbeat_age_seconds=None,
+                    progress_healthy=False,
+                    loop_state=None,
+                    current_operation_id=None,
+                    detail="isolated execution worker exited",
+                )
+            )
+            checks.append(
+                HealthCheck(
+                    "execution_worker_progress",
+                    progress.progress_healthy,
+                    progress.detail,
                 )
             )
         mcp_generation = self._mcp_generation()

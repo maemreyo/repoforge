@@ -228,6 +228,10 @@ def _execution_worker_binding(tmp_path: Path) -> tuple[object, object]:
         correlation_id="c" * 24,
         started_at="2026-07-29T09:26:21+00:00",
         state="running",
+        heartbeat_at="2026-07-29T09:26:31+00:00",
+        loop_state="executing",
+        current_operation_id="op-0123456789abcdef01234567",
+        last_recovery_at="2026-07-29T09:26:25+00:00",
     )
     store.put(written)
     return written, store.get(written.worker_id)

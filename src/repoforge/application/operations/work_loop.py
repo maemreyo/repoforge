@@ -66,6 +66,7 @@ class OperationWorkLoop:
         idle_poll_seconds: float = _DEFAULT_IDLE_POLL_SECONDS,
         heartbeat_interval_seconds: float = _DEFAULT_HEARTBEAT_SECONDS,
         recovery_interval_seconds: float = _DEFAULT_RECOVERY_SECONDS,
+        worker_heartbeat: Callable[[str, str | None, bool], None] | None = None,
     ) -> None:
         if (
             ctx.operation_work_queue is None
@@ -94,6 +95,7 @@ class OperationWorkLoop:
         self._idle_poll_seconds = idle_poll_seconds
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._recovery_interval_seconds = recovery_interval_seconds
+        self._worker_heartbeat = worker_heartbeat
         self._stop = threading.Event()
 
     @property
@@ -103,31 +105,48 @@ class OperationWorkLoop:
     def request_stop(self) -> None:
         self._stop.set()
 
+    def _emit_worker_heartbeat(
+        self,
+        state: str,
+        operation_id: str | None = None,
+        *,
+        recovery_completed: bool = False,
+    ) -> None:
+        if self._worker_heartbeat is not None:
+            self._worker_heartbeat(state, operation_id, recovery_completed)
+
     def run_until_stopped(self, stop_event: threading.Event | None = None) -> None:
         external_stop = stop_event or threading.Event()
         next_recovery_at = time.monotonic()
-        while not self._stop.is_set() and not external_stop.is_set():
-            monotonic_now = time.monotonic()
-            # One iteration must not be able to end the loop. This thread IS durable
-            # execution: when it dies nothing drains the queue, and the only evidence was
-            # a pytest thread-exception warning -- in production, silence. So an
-            # unexpected failure is recorded and the loop backs off and continues.
-            try:
-                if monotonic_now >= next_recovery_at:
-                    recover_operation_work(
-                        self._operations,
-                        self._queue,
-                        now=self._ctx.clock.now_iso(),
-                        expected_config_generation=self._ctx.config_generation or None,
-                        worker_bindings=self._worker_bindings,
-                        reaper=self._reaper,
-                    )
-                    next_recovery_at = monotonic_now + self._recovery_interval_seconds
-                if not self.run_once():
+        self._emit_worker_heartbeat("starting")
+        try:
+            while not self._stop.is_set() and not external_stop.is_set():
+                monotonic_now = time.monotonic()
+                # One iteration must not be able to end the loop. This thread IS durable
+                # execution: when it dies nothing drains the queue, and the only evidence was
+                # a pytest thread-exception warning -- in production, silence. So an
+                # unexpected failure is recorded and the loop backs off and continues.
+                try:
+                    if monotonic_now >= next_recovery_at:
+                        recover_operation_work(
+                            self._operations,
+                            self._queue,
+                            now=self._ctx.clock.now_iso(),
+                            expected_config_generation=self._ctx.config_generation or None,
+                            worker_bindings=self._worker_bindings,
+                            reaper=self._reaper,
+                        )
+                        self._emit_worker_heartbeat("recovering", recovery_completed=True)
+                        next_recovery_at = monotonic_now + self._recovery_interval_seconds
+                    self._emit_worker_heartbeat("claiming")
+                    if not self.run_once():
+                        self._emit_worker_heartbeat("idle")
+                        self._stop.wait(self._idle_poll_seconds)
+                except Exception as exc:
+                    self._report_iteration_failure(exc)
                     self._stop.wait(self._idle_poll_seconds)
-            except Exception as exc:
-                self._report_iteration_failure(exc)
-                self._stop.wait(self._idle_poll_seconds)
+        finally:
+            self._emit_worker_heartbeat("stopping")
 
     def _report_iteration_failure(self, exc: Exception) -> None:
         """Audit an iteration that failed, never re-raising into the loop."""
@@ -158,6 +177,7 @@ class OperationWorkLoop:
             return False
 
         operation_id = item.operation_id
+        self._emit_worker_heartbeat("executing", operation_id)
         try:
             self._operations.start(
                 operation_id,
@@ -294,6 +314,7 @@ class OperationWorkLoop:
                         cancellation_token.cancel()
                         return
                     raise
+                self._emit_worker_heartbeat("executing", operation_id)
 
         def monitor() -> None:
             while not monitor_stop.wait(self._heartbeat_interval_seconds):
@@ -420,4 +441,5 @@ class OperationWorkLoop:
             for binding in bound_child:
                 self._worker_bindings.delete_if_unchanged(binding)
             self._queue.delete(operation_id)
+            self._emit_worker_heartbeat("idle")
         return True

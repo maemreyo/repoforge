@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .operation_task import validate_operation_id
+
 EXECUTION_WORKER_BINDING_SCHEMA_VERSION = 1
 EXECUTION_WORKER_ARCHIVE_SCHEMA_VERSION = 1
 
@@ -35,6 +37,9 @@ _KNOWN_STATES = frozenset(
 #: Terminal states are history: a lease in one of these is archived and removed
 #: from the active registry so the bounded scan can never overflow (#424).
 TERMINAL_STATES = frozenset({"reclaimed", "already_gone"})
+_EXECUTION_LOOP_STATES = frozenset(
+    {"starting", "idle", "recovering", "claiming", "executing", "stopping"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +57,10 @@ class ExecutionWorkerBinding:
     correlation_id: str
     started_at: str
     state: str
+    heartbeat_at: str | None = None
+    loop_state: str | None = None
+    current_operation_id: str | None = None
+    last_recovery_at: str | None = None
 
     @property
     def child_pid(self) -> int:
@@ -130,6 +139,16 @@ def validate_execution_worker_binding(
     if binding.state == "running" and binding.process_start_token is None:
         # Without a start token, PID-reuse safety can never be proven (#420).
         raise ValueError("execution worker running binding requires a process_start_token")
+    if binding.heartbeat_at is not None:
+        _text(binding.heartbeat_at, "heartbeat_at", limit=64)
+    if binding.loop_state is not None and binding.loop_state not in _EXECUTION_LOOP_STATES:
+        raise ValueError(
+            f"execution worker loop_state must be one of {sorted(_EXECUTION_LOOP_STATES)}"
+        )
+    if binding.current_operation_id is not None:
+        validate_operation_id(binding.current_operation_id)
+    if binding.last_recovery_at is not None:
+        _text(binding.last_recovery_at, "last_recovery_at", limit=64)
     return binding
 
 
@@ -147,6 +166,10 @@ def execution_worker_binding_payload(binding: ExecutionWorkerBinding) -> dict[st
         "correlation_id": binding.correlation_id,
         "started_at": binding.started_at,
         "state": binding.state,
+        "heartbeat_at": binding.heartbeat_at,
+        "loop_state": binding.loop_state,
+        "current_operation_id": binding.current_operation_id,
+        "last_recovery_at": binding.last_recovery_at,
     }
 
 
@@ -164,7 +187,14 @@ def execution_worker_binding_from_payload(
         "started_at",
         "state",
     }
-    optional = {"release_sha", "process_start_token"}
+    optional = {
+        "release_sha",
+        "process_start_token",
+        "heartbeat_at",
+        "loop_state",
+        "current_operation_id",
+        "last_recovery_at",
+    }
     allowed = required | optional
     if not required.issubset(payload) or (set(payload) - allowed):
         raise ValueError("execution worker binding payload fields do not match the schema")
@@ -175,7 +205,7 @@ def execution_worker_binding_from_payload(
         return value
 
     # Optional fields are absent in records written before they existed; absence reads
-    # as None (release_sha/process_start_token), never as an unreadable record.
+    # as None, never as an unreadable record.
     state = str(_require(payload["state"], "state"))
     if state == "running" and payload.get("process_start_token") is None:
         # Records written before the token was mandatory (#420) are read back as an
@@ -195,6 +225,26 @@ def execution_worker_binding_from_payload(
         correlation_id=str(_require(payload["correlation_id"], "correlation_id")),
         started_at=str(_require(payload["started_at"], "started_at")),
         state=state,
+        heartbeat_at=(
+            None
+            if payload.get("heartbeat_at") is None
+            else str(_require(payload.get("heartbeat_at"), "heartbeat_at"))
+        ),
+        loop_state=(
+            None
+            if payload.get("loop_state") is None
+            else str(_require(payload.get("loop_state"), "loop_state"))
+        ),
+        current_operation_id=(
+            None
+            if payload.get("current_operation_id") is None
+            else str(_require(payload.get("current_operation_id"), "current_operation_id"))
+        ),
+        last_recovery_at=(
+            None
+            if payload.get("last_recovery_at") is None
+            else str(_require(payload.get("last_recovery_at"), "last_recovery_at"))
+        ),
     )
     return validate_execution_worker_binding(binding)
 

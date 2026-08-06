@@ -20,6 +20,9 @@ from ...ports.operation_work_queue import OperationWorkQueue
 from ...ports.process_reaper import ProcessReaper
 from ...ports.worker_binding_store import WorkerBindingStore
 from .manager import OperationManager
+from .repair import classify_operation_child_binding
+
+_MAX_RECOVERY_BLOCKERS = 100
 
 # How long "operation record present, work item absent" is read as an admission still in
 # progress rather than as a crashed one. Admission performs two durable writes in a fixed
@@ -48,6 +51,13 @@ class OperationRecoveryReport:
     scan_truncated: bool
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class OperationWorkRecoveryBlocker:
+    operation_id: str
+    code: str
+    detail: str
+
+
 @dataclass(frozen=True, slots=True)
 class OperationWorkRecoveryReport:
     scanned: int
@@ -58,6 +68,8 @@ class OperationWorkRecoveryReport:
     stale_generation: int
     cancelled: int
     conflicts: int
+    blocked: int
+    blockers: tuple[OperationWorkRecoveryBlocker, ...]
     scan_truncated: bool
 
 
@@ -326,20 +338,20 @@ def _contain_work_child(
     *,
     worker_bindings: WorkerBindingStore | None,
     reaper: ProcessReaper | None,
-) -> tuple[OperationWorkerBinding | None, str]:
+) -> tuple[OperationWorkerBinding | None, str | None, str]:
     if worker_bindings is None or reaper is None:
-        return None, "durable child containment is not configured"
+        return None, "containment_unconfigured", "durable child containment is not configured"
     binding = worker_bindings.get(item.operation_id)
-    if binding is None:
-        return None, "no durable child identity is available"
-    if binding.owner_id is not None and binding.owner_id != item.owner_id:
-        return None, "child binding owner does not match the claimed work owner"
-    if binding.attempt is not None and binding.attempt != item.attempt:
-        return None, "child binding attempt does not match the claimed work attempt"
+    disposition, blockers = classify_operation_child_binding(item, binding)
+    if disposition is not None:
+        blocker = blockers[0]
+        return None, blocker.code, blocker.detail
+    assert binding is not None
     outcome = reaper.reap(binding)
     if not outcome.reaped or outcome.still_alive:
-        return None, outcome.detail
-    return binding, outcome.detail
+        code = "child_survived" if outcome.still_alive else "identity_unproven"
+        return None, code, outcome.detail
+    return binding, None, outcome.detail
 
 
 def recover_operation_work(
@@ -364,6 +376,20 @@ def recover_operation_work(
     stale_generation = 0
     cancelled = 0
     conflicts = 0
+    blocked = 0
+    blockers: list[OperationWorkRecoveryBlocker] = []
+
+    def record_blocker(item: OperationWorkItem, code: str | None, detail: str) -> None:
+        nonlocal blocked
+        blocked += 1
+        if len(blockers) < _MAX_RECOVERY_BLOCKERS:
+            blockers.append(
+                OperationWorkRecoveryBlocker(
+                    operation_id=item.operation_id,
+                    code=code or "containment_blocked",
+                    detail=detail[:512],
+                )
+            )
 
     for item in work_page.records:
         operation = operations.get(item.operation_id)
@@ -374,13 +400,13 @@ def recover_operation_work(
         if operation.cancellation_requested_at is not None:
             contained_binding = None
             if item.child_started:
-                contained_binding, _detail = _contain_work_child(
+                contained_binding, blocker_code, detail = _contain_work_child(
                     item,
                     worker_bindings=worker_bindings,
                     reaper=reaper,
                 )
                 if contained_binding is None:
-                    conflicts += 1
+                    record_blocker(item, blocker_code, detail)
                     continue
             try:
                 manager.cancelled(
@@ -417,13 +443,13 @@ def recover_operation_work(
                 contained_binding = None
                 if operation.state is OperationState.RUNNING:
                     if item.child_started:
-                        contained_binding, _containment_detail = _contain_work_child(
+                        contained_binding, blocker_code, detail = _contain_work_child(
                             item,
                             worker_bindings=worker_bindings,
                             reaper=reaper,
                         )
                         if contained_binding is None:
-                            conflicts += 1
+                            record_blocker(item, blocker_code, detail)
                             continue
                     manager.orphan(
                         item.operation_id,
@@ -456,13 +482,13 @@ def recover_operation_work(
         ):
             try:
                 if item.child_started:
-                    contained_binding, _containment_detail = _contain_work_child(
+                    contained_binding, blocker_code, detail = _contain_work_child(
                         item,
                         worker_bindings=worker_bindings,
                         reaper=reaper,
                     )
                     if contained_binding is None:
-                        conflicts += 1
+                        record_blocker(item, blocker_code, detail)
                         continue
                     manager.orphan(
                         item.operation_id,
@@ -527,5 +553,7 @@ def recover_operation_work(
         stale_generation=stale_generation,
         cancelled=cancelled,
         conflicts=conflicts,
+        blocked=blocked,
+        blockers=tuple(sorted(blockers)),
         scan_truncated=work_page.scan_truncated or operation_page.scan_truncated,
     )
