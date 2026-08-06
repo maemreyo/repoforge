@@ -506,6 +506,13 @@ class EnforcementEvidence:
     disk: str
     subprocess_count: str
     network_bytes: str
+    #: Added for #384 (sandboxed_turbo): these three dimensions already existed on
+    #: EnforcementAssessment (#385, anticipating a real containment backend) but were never
+    #: projected into caller-facing evidence -- a caller had no way to see whether an escape,
+    #: mount, or socket boundary was actually enforced for a given run.
+    socket: str = EnforcementLevel.UNSUPPORTED.value
+    mount: str = EnforcementLevel.UNSUPPORTED.value
+    symlink: str = EnforcementLevel.UNSUPPORTED.value
 
 
 @dataclass(frozen=True, slots=True)
@@ -564,6 +571,9 @@ def build_execution_evidence(
             disk=assessment.disk.value,
             subprocess_count=assessment.subprocess_count.value,
             network_bytes=assessment.network_bytes.value,
+            socket=assessment.socket.value,
+            mount=assessment.mount.value,
+            symlink=assessment.symlink.value,
         ),
         warnings=bounded_warnings,
         effective_path=identity.effective_path,

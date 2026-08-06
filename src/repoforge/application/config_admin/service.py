@@ -174,6 +174,7 @@ _EXECUTION_FIELDS = (
     "credential_profiles",
     "trusted_host_enabled",
     "trusted_host_max_lease_ttl_seconds",
+    "sandbox_backend_enabled",
 )
 
 
@@ -261,6 +262,11 @@ def _canonical_execution(raw: dict[str, Any] | None, repo_id: str) -> dict[str, 
                 f"integer in 60..{MAX_LEASE_TTL_SECONDS}"
             )
         canonical["trusted_host_max_lease_ttl_seconds"] = lease_ttl_ceiling
+    sandbox_backend_enabled = raw.get("sandbox_backend_enabled")
+    if sandbox_backend_enabled is not None:
+        if not isinstance(sandbox_backend_enabled, bool):
+            raise ConfigError("repo_policy execution.sandbox_backend_enabled must be true or false")
+        canonical["sandbox_backend_enabled"] = sandbox_backend_enabled
     if not canonical:
         raise ConfigError("repo_policy execution must declare at least one field")
     return canonical
@@ -1342,6 +1348,7 @@ class ConfigAdminService:
         credential_profiles: list[str] | None = None,
         trusted_host_enabled: bool | None = None,
         trusted_host_max_lease_ttl_seconds: int | None = None,
+        sandbox_backend_enabled: bool | None = None,
         policy_overrides: dict[str, str] | None = None,
         remove_policy_overrides: list[str] | None = None,
         generated_paths: list[dict[str, Any]] | None = None,
@@ -1370,6 +1377,7 @@ class ConfigAdminService:
             credential_profiles=credential_profiles,
             trusted_host_enabled=trusted_host_enabled,
             trusted_host_max_lease_ttl_seconds=trusted_host_max_lease_ttl_seconds,
+            sandbox_backend_enabled=sandbox_backend_enabled,
         )
         try:
             resolved_generated_paths = (
@@ -1696,6 +1704,7 @@ class ConfigAdminService:
         credential_profiles: list[str] | None,
         trusted_host_enabled: bool | None,
         trusted_host_max_lease_ttl_seconds: int | None,
+        sandbox_backend_enabled: bool | None,
     ) -> RepositoryPolicyPatch:
         try:
             profiles = []
@@ -1722,6 +1731,7 @@ class ConfigAdminService:
                 ),
                 trusted_host_enabled=trusted_host_enabled,
                 trusted_host_max_lease_ttl_seconds=trusted_host_max_lease_ttl_seconds,
+                sandbox_backend_enabled=sandbox_backend_enabled,
                 remove_profiles=tuple(remove_profiles),
                 remove_diagnostics=tuple(remove_diagnostics),
                 remove_formatters=tuple(remove_formatters),

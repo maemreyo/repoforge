@@ -613,7 +613,9 @@ description = "Cross-cutting agent-facing subsystems that do not map to a single
 parallel = true
 # A single 39-file xdist process exceeded 600s. These reviewed contiguous
 # resource families completed independently without increasing worker count.
-parallel_shard_sizes = [12, 13, 6, 8]
+# #384 added 2 files (test_docker_execution_adapter.py, test_execution_routing.py)
+# contiguous with the existing execution-environment tests in the first shard.
+parallel_shard_sizes = [14, 13, 6, 8]
 source_globs = [
   "src/repoforge/application/onboarding/**",
   "src/repoforge/application/skills/**",
@@ -637,6 +639,9 @@ source_globs = [
   "src/repoforge/domain/skills.py",
   "src/repoforge/domain/user_paths.py",
   "src/repoforge/adapters/persistence/json_onboarding_store.py",
+  "src/repoforge/adapters/execution/docker_adapter.py",
+  "src/repoforge/adapters/execution/artifact_collection.py",
+  "src/repoforge/application/execution/routing.py",
 ]
 test_files = [
   "tests/test_adoption_nudges.py",
@@ -648,6 +653,8 @@ test_files = [
   "tests/test_code_reference_spans.py",
   "tests/test_command_executor_error_codes.py",
   "tests/test_doctor_github_capabilities.py",
+  "tests/test_docker_execution_adapter.py",
+  "tests/test_execution_routing.py",
   "tests/test_fingerprint_cache.py",
   "tests/test_latency_tracing.py",
   "tests/test_native_execution_environment.py",

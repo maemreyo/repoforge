@@ -19,6 +19,7 @@ class ErrorCode(str, Enum):
     RESULT_TRANSPORT_BUDGET_EXCEEDED = "RESULT_TRANSPORT_BUDGET_EXCEEDED"
     EXECUTION_POLICY_UNSUPPORTED = "EXECUTION_POLICY_UNSUPPORTED"
     EXECUTION_ENVIRONMENT_DRIFT = "EXECUTION_ENVIRONMENT_DRIFT"
+    EXECUTION_BACKEND_UNAVAILABLE = "EXECUTION_BACKEND_UNAVAILABLE"
     WORKSPACE_INVALID = "WORKSPACE_INVALID"
     WORKSPACE_PATH_MISSING = "WORKSPACE_PATH_MISSING"
     WORKTREE_REGISTRATION_STALE = "WORKTREE_REGISTRATION_STALE"
@@ -420,6 +421,7 @@ def operation_error_from_exception(
         ErrorCode.ADHOC_COMMAND_FORBIDDEN: "The ad-hoc command is an irreversible or history-rewriting form that RepoForge blocks; use the reviewed typed tools instead.",
         ErrorCode.EXECUTION_POLICY_UNSUPPORTED: "The selected execution backend cannot truthfully satisfy a required execution policy.",
         ErrorCode.EXECUTION_ENVIRONMENT_DRIFT: "The execution environment identity changed across a reviewed session or commit gate.",
+        ErrorCode.EXECUTION_BACKEND_UNAVAILABLE: "A backend capable of the required enforcement exists but is not reachable right now.",
         ErrorCode.CREDENTIAL_BROKER_UNAVAILABLE: "The reviewed repository-auth material provider could not resolve the opaque reference.",
         ErrorCode.CREDENTIAL_REFERENCE_NOT_FOUND: "No repository-auth material exists for the selected opaque reference.",
         ErrorCode.CREDENTIAL_EXPIRED: "The selected repository-auth material expired and an equivalent refresh was unavailable.",

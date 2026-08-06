@@ -654,6 +654,7 @@ _REPO_RECOGNIZED = {
     "credential_profiles",
     "trusted_host_enabled",
     "trusted_host_max_lease_ttl_seconds",
+    "sandbox_backend_enabled",
     "trusted_external_checkouts",
 }
 _SERVER_RECOGNIZED = {
@@ -1056,6 +1057,22 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             right.get("trusted_host_max_lease_ttl_seconds", 14_400),
             reason="trusted_host lease TTL ceiling",
         )
+        left_sandbox = bool(left.get("sandbox_backend_enabled", False))
+        right_sandbox = bool(right.get("sandbox_backend_enabled", False))
+        if left_sandbox != right_sandbox:
+            changes.append(
+                CapabilityChange(
+                    prefix + ".sandbox_backend_enabled",
+                    left_sandbox,
+                    right_sandbox,
+                    (
+                        CapabilityDeltaKind.EXPANSION
+                        if right_sandbox
+                        else CapabilityDeltaKind.RESTRICTION
+                    ),
+                    "sandboxed_turbo backend eligibility changed",
+                )
+            )
         left_checkouts = left.get("trusted_external_checkouts")
         right_checkouts = right.get("trusted_external_checkouts")
         left_checkout_map = left_checkouts if isinstance(left_checkouts, dict) else {}

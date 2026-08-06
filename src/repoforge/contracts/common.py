@@ -341,6 +341,15 @@ class EnforcementEvidenceModel(StrictModel):
     disk: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
     subprocess_count: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
     network_bytes: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"]
+    socket: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"] = (
+        "unsupported"
+    )
+    mount: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"] = (
+        "unsupported"
+    )
+    symlink: Literal["enforced", "advisory", "observed", "unsupported", "not_applicable"] = (
+        "unsupported"
+    )
 
 
 class ToolVersionModel(StrictModel):

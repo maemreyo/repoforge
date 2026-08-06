@@ -41,6 +41,7 @@ from .adapters.code_intelligence import (
     TreeSitterCodeIntelligenceProvider,
 )
 from .adapters.configuration import ConfigGenerationStore
+from .adapters.execution.docker_adapter import DockerExecutionAdapter
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
 from .adapters.filesystem.receipt_transaction_factory import (
@@ -176,6 +177,7 @@ from .application.auth_ux import AuthUxService, ObserveRepository
 from .application.configuration.source import parse_source
 from .application.context import ApplicationContext
 from .application.execution.coordinator import ExecutionCoordinator
+from .application.execution.routing import RoutingExecutionEnvironment
 from .application.extended_context import ExtendedApplicationContext
 from .application.fingerprint_cache import FingerprintCache
 from .application.nudges import AdoptionNudgeTracker
@@ -1624,9 +1626,12 @@ def build_application(
     config.server.state_root.mkdir(parents=True, exist_ok=True)
     clock = o.clock or SystemClock()
     command = o.command or SubprocessCommandExecutor(config.server)
-    execution_environment = o.execution_environment or NativeReviewedAdapter(
-        command,
-        max_artifact_bytes=config.server.max_file_bytes,
+    execution_environment = o.execution_environment or RoutingExecutionEnvironment(
+        native=NativeReviewedAdapter(command, max_artifact_bytes=config.server.max_file_bytes),
+        # Constructing this is cheap and touches neither the filesystem nor the network --
+        # Docker reachability is only checked lazily, inside prepare_session, the first time a
+        # sandboxed_turbo-enrolled repository actually requests enforcement (#384).
+        sandboxed=DockerExecutionAdapter(command),
     )
     execution = ExecutionCoordinator(execution_environment)
     store = o.store or JsonWorkspaceStore(config.server.state_root)

@@ -173,6 +173,8 @@ def apply_policy_patch(
         repo["trusted_host_enabled"] = patch.trusted_host_enabled
     if patch.trusted_host_max_lease_ttl_seconds is not None:
         repo["trusted_host_max_lease_ttl_seconds"] = patch.trusted_host_max_lease_ttl_seconds
+    if patch.sandbox_backend_enabled is not None:
+        repo["sandbox_backend_enabled"] = patch.sandbox_backend_enabled
     profiles = repo.setdefault("profiles", {})
     if not isinstance(profiles, dict):
         raise ValueError(f"repositories.{repo_id}.profiles must be a table")

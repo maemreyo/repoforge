@@ -21,18 +21,24 @@ uses for its own `_verify_adhoc` calls).
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment, durable_worker
 
+from repoforge.adapters.execution.docker_adapter import DockerExecutionAdapter
+from repoforge.adapters.execution.native import NativeReviewedAdapter
 from repoforge.adapters.persistence.json_lease_store import JsonHostBypassLeaseStore
+from repoforge.application.execution.routing import RoutingExecutionEnvironment
 from repoforge.bootstrap import build_lock_manager
 from repoforge.contracts.v2 import WorkspaceExecInput
 from repoforge.domain.adhoc import MAX_ADHOC_STDIN_LENGTH
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.host_bypass_lease import HostBypassLease, mint_lease_token
+from repoforge.ports.command import CommandResult
 
 
 def _relaxed_env(
@@ -999,3 +1005,182 @@ def test_lease_ignored_when_repository_not_enrolled(tmp_path: Path) -> None:
     with pytest.raises(RepoForgeError) as exc:
         _exec(env, workspace_id, ("node", "--version"), lease_token=token)
     assert exc.value.code is ErrorCode.ADHOC_RUNNER_NOT_ALLOWED
+
+
+# ---------------------------------------------------------------------------
+# #384: `sandboxed_turbo` execution backend widens the runner allowlist only for a
+# repository enrolled in `sandbox_backend_enabled`, exactly like a #383 lease --
+# never a model-mintable authorization, never a bypass of #385's circuit breakers.
+# ---------------------------------------------------------------------------
+
+
+class _DirectCommandExecutor:
+    """Minimal CommandExecutor for these admission-wiring tests: runs real subprocesses
+    directly on the host, with no PATH/environment shaping. Only ever wired into a
+    test-local execution-environment override, never the production-wired executor."""
+
+    def environment(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        env = dict(os.environ)
+        if extra:
+            env.update(extra)
+        return env
+
+    def run(
+        self,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        input_text: str | None = None,
+        timeout: int | None = None,
+        check: bool = True,
+        extra_env: dict[str, str] | None = None,
+        output_limit: int | None = None,
+        cancel_token: object | None = None,
+    ) -> CommandResult:
+        proc = subprocess.run(
+            list(argv),
+            cwd=str(cwd),
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ, **(extra_env or {})},
+        )
+        return CommandResult(
+            argv=tuple(argv),
+            cwd=str(cwd),
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+
+    def run_isolated(self, *args: object, **kwargs: object) -> CommandResult:
+        raise NotImplementedError
+
+    def run_bytes(
+        self, argv: tuple[str, ...], *, cwd: Path, timeout: int | None = None, max_bytes: int
+    ) -> bytes:
+        proc = subprocess.run(list(argv), cwd=str(cwd), capture_output=True, timeout=timeout)
+        return proc.stdout[:max_bytes]
+
+
+class _LocalSandboxAdapter(DockerExecutionAdapter):
+    """Test double: inherits DockerExecutionAdapter's real policy/identity/enforcement
+    logic unchanged (proving the *admission* wiring reaches the sandboxed backend and
+    gets back a distinct, honest identity), but runs the reviewed argv directly on the
+    host instead of inside a real container, so these tests need no Docker daemon.
+    Real containment enforcement is proven separately by Docker-gated integration
+    tests exercising the real adapter end-to-end."""
+
+    def __init__(self, executor: _DirectCommandExecutor) -> None:
+        super().__init__(executor)
+        self._reachable = True  # skip the docker-reachability probe entirely
+
+    def execute_in_session(
+        self,
+        session: object,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        timeout: int,
+        output_limit: int,
+        check: bool,
+        cancel_token: object | None = None,
+        stdin_text: str | None = None,
+        extra_env: tuple[tuple[str, str], ...] = (),
+    ) -> CommandResult:
+        self._session_context(session.session_id)  # type: ignore[attr-defined]
+        return self._executor.run(
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            check=check,
+            output_limit=output_limit,
+            input_text=stdin_text,
+            extra_env=dict(extra_env) or None,
+        )
+
+
+def _sandbox_env(tmp_path: Path, *, runners: tuple[str, ...] = ()) -> ForgeEnvironment:
+    executor = _DirectCommandExecutor()
+    routing = RoutingExecutionEnvironment(
+        native=NativeReviewedAdapter(executor),  # type: ignore[arg-type]
+        sandboxed=_LocalSandboxAdapter(executor),
+    )
+    return create_forge_environment(
+        tmp_path,
+        execution_mode="strict",
+        adhoc_runners=runners,
+        sandbox_backend_enabled=True,
+        execution_environment=routing,
+    )
+
+
+def test_sandbox_widens_runner_allowlist_beyond_strict_mode(tmp_path: Path) -> None:
+    """#384 AC1: a sandboxed_turbo request lets a normally-disabled (strict) repository
+    run an arbitrary command, without the operator making the repository relaxed or
+    listing the runner in adhoc_runners at all."""
+    env = _sandbox_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "sandboxed_turbo widens allowlist")[
+        "workspace_id"
+    ]
+
+    result = _exec(env, workspace_id, ("python3", "--version"), sandbox_requested=True)
+
+    assert result["outcome"] == "passed"
+    assert result["commands"][0]["returncode"] == 0
+
+
+def test_sandbox_never_widens_circuit_breakers(tmp_path: Path) -> None:
+    """#384: sandboxed_turbo widens the runner allowlist only -- #385's circuit
+    breakers and #407's protected-ref check still apply unconditionally."""
+    env = _sandbox_env(tmp_path, runners=("git",))
+    workspace_id = env.service.workspace_create("demo", "sandboxed_turbo still blocked")[
+        "workspace_id"
+    ]
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec(
+            env,
+            workspace_id,
+            ("git", "push", "--force", "origin", "main"),
+            sandbox_requested=True,
+        )
+    assert exc.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
+
+
+def test_sandbox_ignored_when_repository_not_enrolled(tmp_path: Path) -> None:
+    """#384: sandbox_backend_enabled=False (the default) means sandbox_requested=True
+    is inert -- ordinary relaxed-mode admission (here, its runner allowlist) still
+    applies, never a partial or degraded bypass."""
+    env = _relaxed_env(tmp_path)  # sandbox_backend_enabled defaults to False
+
+    workspace_id = env.service.workspace_create("demo", "sandboxed_turbo not enrolled")[
+        "workspace_id"
+    ]
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec(env, workspace_id, ("node", "--version"), sandbox_requested=True)
+    assert exc.value.code is ErrorCode.ADHOC_RUNNER_NOT_ALLOWED
+
+
+def test_sandbox_evidence_is_distinct_from_native_and_lease(tmp_path: Path) -> None:
+    """#384 AC3: sandboxed_turbo evidence differs structurally from both the ordinary
+    native path and a #383 host-bypass lease -- a distinct adapter_kind, and an
+    explicit sandbox_backend_requested marker mirroring the lease's own
+    trusted_host_lease_id marker."""
+    env = _sandbox_env(tmp_path)
+    workspace_id = env.service.workspace_create("demo", "sandboxed_turbo evidence distinctness")[
+        "workspace_id"
+    ]
+
+    result = _exec(env, workspace_id, ("python3", "--version"), sandbox_requested=True)
+
+    assert result["execution_evidence"]["adapter_kind"] == "hermetic_container"
+
+    events = _audit_events(env.root, "workspace_run_adhoc")
+    assert events, "expected at least one workspace_run_adhoc audit event"
+    details = events[-1]["details"]
+    assert isinstance(details, dict)
+    assert details["sandbox_backend_requested"] is True
+    assert details["trusted_host_lease_id"] is None

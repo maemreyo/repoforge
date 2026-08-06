@@ -396,6 +396,7 @@ def test_adhoc_work_request_round_trips_exact_argv_and_policy() -> None:
         "stdin_text": None,
         "declared_effect": None,
         "lease_token": None,
+        "sandbox_requested": False,
         "expected_head_sha": "b" * 40,
         "expected_fingerprint": "c" * 64,
         "config_generation": 12,

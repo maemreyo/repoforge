@@ -429,6 +429,18 @@ capability negotiation validated through #404 before the old surface is removed.
     `OperatorOverrideAttestation` interface shape (§15). Adversarial proof that these breakers hold under
     attack is explicitly **not** settled here — tracked as open item 6 below, per #385's own scope
     disclaiming backend/adversarial proof.
+11. **Sandboxed network default posture (#384)** — settled as **default-allow**: a `sandboxed_turbo`
+    request with no further declaration gets the container's bridge network (general egress);
+    containment itself (bind-mount isolation, capability drops, no host-socket exposure) is the primary
+    boundary, not network policy. `NetworkAccess.OFFLINE` remains available and maps to a real
+    `--network none` (`ENFORCED`) when a caller declares it explicitly. `PUBLIC_HTTP_HTTPS` degrades
+    honestly to `PUBLIC_GENERAL` (`ADVISORY`) rather than claiming port-scoped enforcement Docker alone
+    cannot provide.
+12. **Ambient credentials under `sandboxed_turbo` (#384)** — settled as **brokered per profile**,
+    identical to `trusted_host`: reuses #381's existing named credential-profile mechanism
+    (`resolve_credential_profile_env`), injected into the container as environment via `--env-file`
+    (never `-e KEY=VALUE`, which would put secret values in the host-visible `docker run` argv). Never
+    denied outright, and never the ambient host environment wholesale.
 
 **Genuinely open:**
 1. **Tool-count mechanics for `workspace_exec`** (§9) — gated on #404.
@@ -441,13 +453,9 @@ capability negotiation validated through #404 before the old surface is removed.
    question as this item, which is about a *future* authority (an operator-only override, or a
    `trusted_host`-scoped one) that doesn't exist yet. §385's dedicated error codes (§15) name the two
    forms distinctly but do not decide this policy question; still gated on #375/#407.
-4. **Sandboxed network default posture** — default-deny vs. profile-based, for the `sandboxed` backend's
-   own container network policy under `sandboxed_turbo` (§4 mode matrix). This is a container-config
-   decision #384 makes for the backend itself, distinct from §14's `trusted_host`/`host_effect_scope`
-   classification of effects outside the checkout — #405's contribution to this item is complete (§14);
-   what remains is gated on #384 alone.
-5. **Ambient credentials under `sandboxed_turbo`** — denied outright vs. brokered per profile (§4).
-   Gated on #381/#384.
+4. ~~Sandboxed network default posture~~ — **Settled**, see Settled item 11 above (default-allow).
+5. ~~Ambient credentials under `sandboxed_turbo`~~ — **Settled**, see Settled item 12 above (brokered
+   per profile).
 6. **Backend enforcement proof** — that §6's non-bypassable list, §15's circuit-breaker contract, and
    §2's threat classes hold under adversarial testing is #406/#407's job against a real `sandboxed`
    backend (#384), not something a policy document settles by assertion, and not something #385 itself

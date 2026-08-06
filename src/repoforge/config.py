@@ -266,6 +266,12 @@ class RepositoryConfig:
     #: exactly the two-tier split autonomy-policy-model.md §7 already names.
     trusted_host_enabled: bool = False
     trusted_host_max_lease_ttl_seconds: int = 14_400
+    #: Static capability configuration for #384's `sandboxed_turbo` posture -- whether this
+    #: repository may request the real containment backend at all. Mirrors
+    #: `trusted_host_enabled`'s two-tier split: this rarely-changing capability flag is reviewed
+    #: like any other repository policy, distinct from the per-call opt-in on each
+    #: `workspace_exec` request.
+    sandbox_backend_enabled: bool = False
     ticket_graph: GitHubTicketGraphConfig | None = None
     generated_paths: tuple[GeneratedPathRule, ...] = ()
     issue_writes: IssueWritePolicy = field(default_factory=IssueWritePolicy)
@@ -1558,6 +1564,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             14_400,
             f"repositories.{repo_id}.trusted_host_max_lease_ttl_seconds",
         )
+        sandbox_backend_enabled = _boolean(
+            repo_raw.get("sandbox_backend_enabled"),
+            False,
+            f"repositories.{repo_id}.sandbox_backend_enabled",
+        )
         trusted_external_checkouts = _load_trusted_external_checkouts(
             repo_raw.get("trusted_external_checkouts"),
             repo_id,
@@ -1639,6 +1650,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             credential_profiles=credential_profiles,
             trusted_host_enabled=trusted_host_enabled,
             trusted_host_max_lease_ttl_seconds=trusted_host_max_lease_ttl_seconds,
+            sandbox_backend_enabled=sandbox_backend_enabled,
             ticket_graph=ticket_graph,
             generated_paths=generated_paths,
             issue_writes=issue_writes,

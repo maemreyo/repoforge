@@ -120,6 +120,10 @@ class WorkspaceRunAdhocCommand:
     #: anything beyond what the resolved lease's own scope already grants -- see
     #: _resolve_lease_for_command.
     lease_token: str | None = None
+    #: Request the #384 `sandboxed_turbo` execution backend. Like a lease, only ever
+    #: takes effect when the repository is also enrolled (`sandbox_backend_enabled`) --
+    #: see the live re-check in execute()/execute_sequence().
+    sandbox_requested: bool = False
     cancellation_token: CancellationToken | None = None
 
 
@@ -186,6 +190,7 @@ class WorkspaceRunAdhocSequenceCommand:
     mutability: str = "read_only"
     declared_effect: str | None = None
     lease_token: str | None = None
+    sandbox_requested: bool = False
     cancellation_token: CancellationToken | None = None
 
 
@@ -495,7 +500,15 @@ class WorkspaceAdhocRunner:
             checkout_identity=record.workspace_id,
             branch=record.branch,
         )
-        if lease is None and repo.execution_mode is not ExecutionMode.RELAXED:
+        # Live re-check (not just the caller's request): an operator disabling
+        # sandbox_backend_enabled takes effect on the next call, exactly like the lease's
+        # own live trusted_host_enabled re-check.
+        sandbox_active = c.sandbox_requested and repo.sandbox_backend_enabled
+        if (
+            lease is None
+            and not sandbox_active
+            and repo.execution_mode is not ExecutionMode.RELAXED
+        ):
             raise _strict_mode_error(repo.repo_id)
         if c.mutability not in {"read_only", "workspace"}:
             raise _adhoc_error(
@@ -525,7 +538,9 @@ class WorkspaceAdhocRunner:
                     ErrorCode.ADHOC_ARGV_INVALID,
                 )
             argv = validate_adhoc_argv(
-                c.argv, repo.effective_adhoc_runners(), bypass_runner_allowlist=lease is not None
+                c.argv,
+                repo.effective_adhoc_runners(),
+                bypass_runner_allowlist=lease is not None or sandbox_active,
             )
             # Content-inspect the exact argv: blocks irreversible/history-rewriting git
             # forms (raising ADHOC_COMMAND_FORBIDDEN before any process starts) and infers
@@ -586,6 +601,7 @@ class WorkspaceAdhocRunner:
             # secrets) -- only whether a lease resolved and which one, so a revoked or
             # expired lease's earlier uses remain traceable.
             "trusted_host_lease_id": lease.lease_id if lease is not None else None,
+            "sandbox_backend_requested": sandbox_active,
         }
 
         def record_command_failure(exc: CommandError) -> None:
@@ -668,6 +684,7 @@ class WorkspaceAdhocRunner:
                         *resolve_credential_profile_env(locked_repo.credential_profiles),
                         *_gh_credential_scrub_env(locked_workspace),
                     ),
+                    sandbox=sandbox_active,
                 )
                 try:
                     with (
@@ -827,7 +844,12 @@ class WorkspaceAdhocRunner:
             checkout_identity=record.workspace_id,
             branch=record.branch,
         )
-        if lease is None and repo.execution_mode is not ExecutionMode.RELAXED:
+        sandbox_active = c.sandbox_requested and repo.sandbox_backend_enabled
+        if (
+            lease is None
+            and not sandbox_active
+            and repo.execution_mode is not ExecutionMode.RELAXED
+        ):
             raise _strict_mode_error(repo.repo_id)
         if c.mutability not in {"read_only", "workspace"}:
             raise _adhoc_error(
@@ -837,7 +859,7 @@ class WorkspaceAdhocRunner:
         validated = validate_adhoc_sequence(
             c.argv_sequence,
             repo.effective_adhoc_runners(),
-            bypass_runner_allowlist=lease is not None,
+            bypass_runner_allowlist=lease is not None or sandbox_active,
         )
         effect_classes = [classify_adhoc_effect(argv) for argv in validated]
         for argv in validated:
@@ -888,6 +910,7 @@ class WorkspaceAdhocRunner:
             "declared_effect": declared_effect.value,
             "effect_mismatch": sequence_effect_mismatch,
             "trusted_host_lease_id": lease.lease_id if lease is not None else None,
+            "sandbox_backend_requested": sandbox_active,
         }
 
         def run_body() -> WorkspaceRunAdhocSequenceResult:
@@ -971,6 +994,7 @@ class WorkspaceAdhocRunner:
                             *resolve_credential_profile_env(locked_repo.credential_profiles),
                             *_gh_credential_scrub_env(locked_workspace),
                         ),
+                        sandbox=sandbox_active,
                     )
                     try:
                         with (

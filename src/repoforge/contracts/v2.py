@@ -1860,6 +1860,19 @@ class WorkspaceExecInput(StrictModel):
             "admission still applies, never a partial or degraded bypass."
         ),
     )
+    sandbox_requested: bool = Field(
+        default=False,
+        description=(
+            "Request the `sandboxed_turbo` execution backend (#384): real OS-level "
+            "containment (bind-mounted workspace, isolated network/mount namespace) "
+            "instead of the bare host. Like a `trusted_host` lease, this can only ever "
+            "widen the runner allowlist for repositories enrolled in "
+            "`sandbox_backend_enabled` -- every non-bypassable circuit breaker (#385) "
+            "and the credential-scrub/protected-ref checks (#407) still apply "
+            "regardless. Ignored (ordinary admission applies) for a repository not "
+            "enrolled, never a partial or degraded bypass."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_command_form(self) -> WorkspaceExecInput:

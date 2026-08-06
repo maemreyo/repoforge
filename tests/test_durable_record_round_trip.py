@@ -611,6 +611,7 @@ _WORK_REQUEST_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
             "stdin_text",
             "declared_effect",
             "lease_token",
+            "sandbox_requested",
         }
     ),
     "diagnostic": frozenset(
@@ -661,6 +662,7 @@ def _operation_work_item(kind: str) -> Callable[[Path], tuple[object, object]]:
                 "stdin_text": "--- a/x\n+++ b/x\n",
                 "declared_effect": "local_history",
                 "lease_token": "fixture-raw-token",
+                "sandbox_requested": True,
             },
             "diagnostic": {
                 "diagnostic_id": "diag-1",

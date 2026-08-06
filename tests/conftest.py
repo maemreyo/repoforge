@@ -23,6 +23,7 @@ from repoforge.config import AppConfig, load_config
 from repoforge.domain.errors import CommandError
 from repoforge.domain.mutation_policy import MUTATION_OPS
 from repoforge.ports.clock import Clock
+from repoforge.ports.execution_environment import ExecutionEnvironmentPort
 from repoforge.ports.workspace_publication import (
     WorkspaceDraftPrPublication,
     WorkspaceDraftPrPublicationEffect,
@@ -665,12 +666,21 @@ raise SystemExit(2)
     script.chmod(0o755)
 
 
-def build_test_service(config: AppConfig, *, clock: Clock | None = None) -> CodingService:
+def build_test_service(
+    config: AppConfig,
+    *,
+    clock: Clock | None = None,
+    execution_environment: ExecutionEnvironmentPort | None = None,
+) -> CodingService:
     """Compose explicit fixture publication effects without changing production defaults."""
 
     application = build_application(
         config,
-        overrides=AdapterOverrides(clock=clock) if clock is not None else None,
+        overrides=(
+            AdapterOverrides(clock=clock, execution_environment=execution_environment)
+            if clock is not None or execution_environment is not None
+            else None
+        ),
         config_generation=TEST_CONFIG_GENERATION,
     )
     object.__setattr__(
@@ -697,6 +707,8 @@ def create_forge_environment(
     trusted_external_checkouts: dict[str, str] | None = None,
     trusted_host_enabled: bool = False,
     trusted_host_max_lease_ttl_seconds: int = 14_400,
+    sandbox_backend_enabled: bool = False,
+    execution_environment: ExecutionEnvironmentPort | None = None,
 ) -> ForgeEnvironment:
     remote, source = _clone_template_repo(tmp_path)
 
@@ -747,6 +759,7 @@ execution_profiles = {json.dumps(list(execution_profiles))}
 credential_profiles = {json.dumps(list(credential_profiles))}
 trusted_host_enabled = {str(trusted_host_enabled).lower()}
 trusted_host_max_lease_ttl_seconds = {trusted_host_max_lease_ttl_seconds}
+sandbox_backend_enabled = {str(sandbox_backend_enabled).lower()}
 {trusted_checkouts_section}
 
 [repositories.demo.profiles.quick]
@@ -790,7 +803,7 @@ parser = "ruff_format"
     # both the request side and the worker side ran at 0, so the generation filter matched
     # and nothing was ever unclaimable. That is precisely why #313 -- request side 0,
     # worker side 12 -- was invisible to this suite.
-    service = build_test_service(config, clock=clock)
+    service = build_test_service(config, clock=clock, execution_environment=execution_environment)
     return ForgeEnvironment(
         root=tmp_path,
         remote=remote,

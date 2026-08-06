@@ -82,6 +82,8 @@ class WorkspaceExecCommand:
     #: Opaque #383 `trusted_host` lease token (never persisted or echoed back --
     #: only whether one resolved to an active lease is recorded as evidence).
     lease_token: str | None = None
+    #: Request the #384 `sandboxed_turbo` execution backend for this call.
+    sandbox_requested: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +166,7 @@ class WorkspaceExecutor:
                 stdin_text=command.stdin_text,
                 declared_effect=command.declared_effect,
                 lease_token=command.lease_token,
+                sandbox_requested=command.sandbox_requested,
             ),
             operation_kind="workspace_run_adhoc",
         )

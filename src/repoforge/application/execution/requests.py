@@ -33,7 +33,21 @@ def _request(
     cancel_token: CancellationToken | None = None,
     stdin_text: str | None = None,
     extra_env: tuple[tuple[str, str], ...] = (),
+    sandbox: bool = False,
 ) -> ExecutionRequest:
+    requested_policy = (
+        RequestedExecutionPolicy(
+            network=NetworkAccess.PUBLIC_GENERAL,
+            filesystem=filesystem,
+            enforcement_requirement=EnforcementRequirement.ENFORCEMENT_REQUIRED,
+        )
+        if sandbox
+        else RequestedExecutionPolicy(
+            network=NetworkAccess.OFFLINE,
+            filesystem=filesystem,
+            enforcement_requirement=EnforcementRequirement.ADVISORY_BACKEND_ALLOWED,
+        )
+    )
     return ExecutionRequest(
         scope=ExecutionScope(
             kind=ExecutionScopeKind.WORKSPACE,
@@ -43,11 +57,7 @@ def _request(
             working_directory_policy=working_directory_policy,
         ),
         reviewed_commands=commands,
-        requested_policy=RequestedExecutionPolicy(
-            network=NetworkAccess.OFFLINE,
-            filesystem=filesystem,
-            enforcement_requirement=EnforcementRequirement.ADVISORY_BACKEND_ALLOWED,
-        ),
+        requested_policy=requested_policy,
         timeout_seconds=timeout_seconds,
         output_limit=output_limit,
         artifact_paths=artifact_paths,
@@ -125,6 +135,7 @@ def adhoc_execution_request(
     cancel_token: CancellationToken | None = None,
     stdin_text: str | None = None,
     extra_env: tuple[tuple[str, str], ...] = (),
+    sandbox: bool = False,
 ) -> ExecutionRequest:
     return _request(
         workspace_id=workspace_id,
@@ -139,6 +150,7 @@ def adhoc_execution_request(
         cancel_token=cancel_token,
         stdin_text=stdin_text,
         extra_env=extra_env,
+        sandbox=sandbox,
     )
 
 

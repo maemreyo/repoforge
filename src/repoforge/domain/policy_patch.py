@@ -402,6 +402,7 @@ class RepositoryPolicyPatch:
     credential_profiles: tuple[str, ...] | None = None
     trusted_host_enabled: bool | None = None
     trusted_host_max_lease_ttl_seconds: int | None = None
+    sandbox_backend_enabled: bool | None = None
     remove_profiles: tuple[str, ...] = ()
     remove_diagnostics: tuple[str, ...] = ()
     remove_formatters: tuple[str, ...] = ()
@@ -462,6 +463,10 @@ class RepositoryPolicyPatch:
                 "trusted_host_max_lease_ttl_seconds must be an integer in "
                 f"60..{MAX_LEASE_TTL_SECONDS}"
             )
+        if self.sandbox_backend_enabled is not None and not isinstance(
+            self.sandbox_backend_enabled, bool
+        ):
+            raise PolicyPatchError("sandbox_backend_enabled must be true or false")
         for label, entries in (
             ("profiles", self.profiles),
             ("diagnostics", self.diagnostics),
@@ -528,6 +533,7 @@ class RepositoryPolicyPatch:
             or self.credential_profiles is not None
             or self.trusted_host_enabled is not None
             or self.trusted_host_max_lease_ttl_seconds is not None
+            or self.sandbox_backend_enabled is not None
             or self.remove_profiles
             or self.remove_diagnostics
             or self.remove_formatters
@@ -598,6 +604,11 @@ class RepositoryPolicyPatch:
                 if other.trusted_host_max_lease_ttl_seconds is not None
                 else self.trusted_host_max_lease_ttl_seconds
             ),
+            sandbox_backend_enabled=(
+                other.sandbox_backend_enabled
+                if other.sandbox_backend_enabled is not None
+                else self.sandbox_backend_enabled
+            ),
             remove_profiles=tuple(remove_profiles),
             remove_diagnostics=tuple(remove_diagnostics),
             remove_formatters=tuple(remove_formatters),
@@ -621,6 +632,8 @@ class RepositoryPolicyPatch:
             table["trusted_host_enabled"] = self.trusted_host_enabled
         if self.trusted_host_max_lease_ttl_seconds is not None:
             table["trusted_host_max_lease_ttl_seconds"] = self.trusted_host_max_lease_ttl_seconds
+        if self.sandbox_backend_enabled is not None:
+            table["sandbox_backend_enabled"] = self.sandbox_backend_enabled
         if self.remove_profiles:
             table["remove_profiles"] = list(self.remove_profiles)
         if self.remove_diagnostics:
@@ -655,6 +668,7 @@ class RepositoryPolicyPatch:
                 "credential_profiles",
                 "trusted_host_enabled",
                 "trusted_host_max_lease_ttl_seconds",
+                "sandbox_backend_enabled",
                 "remove_profiles",
                 "remove_diagnostics",
                 "remove_formatters",
@@ -702,6 +716,7 @@ class RepositoryPolicyPatch:
             ),
             trusted_host_enabled=raw.get("trusted_host_enabled"),
             trusted_host_max_lease_ttl_seconds=raw.get("trusted_host_max_lease_ttl_seconds"),
+            sandbox_backend_enabled=raw.get("sandbox_backend_enabled"),
             remove_profiles=tuple(raw.get("remove_profiles", ())),
             remove_diagnostics=tuple(raw.get("remove_diagnostics", ())),
             remove_formatters=tuple(raw.get("remove_formatters", ())),

@@ -52,7 +52,15 @@ _ADHOC_REQUEST_FIELDS = frozenset(
 #: stays exact about unknown fields; it is only tolerant about these missing ones.
 _OPTIONAL_REQUEST_FIELDS: dict[str, frozenset[str]] = {
     "adhoc": frozenset(
-        {"stdin_text", "script", "shell", "argv_sequence", "declared_effect", "lease_token"}
+        {
+            "stdin_text",
+            "script",
+            "shell",
+            "argv_sequence",
+            "declared_effect",
+            "lease_token",
+            "sandbox_requested",
+        }
     )
 }
 _DIAGNOSTIC_REQUEST_FIELDS = frozenset(
@@ -113,6 +121,8 @@ class OperationWorkRequest:
     #: claims this request can resolve it -- never echoed into audit_details, evidence,
     #: or the result payload; only whether a lease resolved is recorded.
     lease_token: str | None = None
+    #: Request the #384 `sandboxed_turbo` execution backend for this command.
+    sandbox_requested: bool = False
 
     def __post_init__(self) -> None:
         """Durable state is the execution authority after crash/retry -- it must not
@@ -224,6 +234,7 @@ class OperationWorkRequest:
         stdin_text: str | None = None,
         declared_effect: str | None = None,
         lease_token: str | None = None,
+        sandbox_requested: bool = False,
     ) -> Self:
         return cls(
             kind="adhoc",
@@ -237,6 +248,7 @@ class OperationWorkRequest:
             stdin_text=stdin_text,
             declared_effect=declared_effect,
             lease_token=lease_token,
+            sandbox_requested=sandbox_requested,
             expected_head_sha=expected_head_sha,
             expected_fingerprint=expected_fingerprint,
             config_generation=config_generation,
@@ -414,6 +426,7 @@ def work_item_payload(item: OperationWorkItem) -> dict[str, object]:
             "stdin_text": request.stdin_text,
             "declared_effect": request.declared_effect,
             "lease_token": request.lease_token,
+            "sandbox_requested": request.sandbox_requested,
             "expected_head_sha": request.expected_head_sha,
             "expected_fingerprint": request.expected_fingerprint,
             "config_generation": request.config_generation,
@@ -553,6 +566,7 @@ def work_item_from_payload(payload: dict[str, object]) -> OperationWorkItem:
                 if request_payload.get("lease_token") is None
                 else str(request_payload["lease_token"])
             ),
+            sandbox_requested=bool(request_payload.get("sandbox_requested", False)),
             expected_head_sha=str(request_payload["expected_head_sha"]),
             expected_fingerprint=str(request_payload["expected_fingerprint"]),
             config_generation=int(request_payload["config_generation"]),

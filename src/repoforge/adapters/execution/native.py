@@ -9,7 +9,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from ...domain.errors import ErrorCode, RepoForgeError, SecurityError
+from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.execution_environment import (
     NATIVE_ADVISORY_ENFORCEMENT,
     EffectiveExecutionPolicy,
@@ -34,6 +34,7 @@ from ...ports.execution_environment import (
     ExecutionRequest,
     PreparedEnvironmentSession,
 )
+from .artifact_collection import collect_workspace_artifacts
 from .native_identity import (
     collect_environment_hashes,
     collect_file_digests,
@@ -328,33 +329,11 @@ class NativeReviewedAdapter:
     def collect_artifacts(
         self, artifact_paths: Sequence[str], *, workspace_root: Path
     ) -> tuple[ArtifactResult, ...]:
-        root = workspace_root.resolve(strict=True)
-        artifacts: list[ArtifactResult] = []
-        for relative_path in artifact_paths:
-            unresolved = workspace_root / relative_path
-            if unresolved.is_symlink():
-                raise SecurityError(f"Artifact path cannot be a symlink: {relative_path}")
-            resolved = unresolved.resolve(strict=False)
-            try:
-                _ = resolved.relative_to(root)
-            except ValueError as exc:
-                raise SecurityError(f"Artifact path escapes workspace: {relative_path}") from exc
-            if not resolved.is_file():
-                continue
-            size = resolved.stat().st_size
-            if size > self._max_artifact_bytes:
-                raise SecurityError(
-                    f"Artifact exceeds {self._max_artifact_bytes} byte limit: {relative_path}"
-                )
-            payload = resolved.read_bytes()
-            artifacts.append(
-                ArtifactResult(
-                    path=relative_path,
-                    size_bytes=size,
-                    digest=hashlib.sha256(payload).hexdigest(),
-                )
-            )
-        return tuple(artifacts)
+        return collect_workspace_artifacts(
+            artifact_paths,
+            workspace_root=workspace_root,
+            max_artifact_bytes=self._max_artifact_bytes,
+        )
 
     def cleanup(self, request: EnvironmentIdentityRequest) -> None:
         _ = request
