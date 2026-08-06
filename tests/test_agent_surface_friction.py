@@ -280,6 +280,17 @@ class TestTimeoutRemedyNamesTheBudget:
         assert "reproducible" in remedy
         assert "chunk" in remedy
 
+    def test_the_inline_remedy_names_the_smaller_ceiling_and_the_escape_hatch(self) -> None:
+        """The #378 inline fast path fails fast against a smaller, separate ceiling
+        (adhoc_inline_max_seconds) -- "raise adhoc_timeout_seconds" alone would be the
+        wrong instruction here, since that is not the budget that was actually hit. The
+        remedy must name the ceiling that fired and the one legitimate way past it."""
+        remedy = _adhoc_timeout_remedy(10, inline=True)
+
+        assert "10s" in remedy
+        assert "adhoc_inline_max_seconds" in remedy
+        assert "background=true" in remedy
+
 
 class TestLostResponseRecovery:
     """A transport failure between effect and response must stay answerable.

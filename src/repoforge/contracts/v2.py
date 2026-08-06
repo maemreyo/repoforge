@@ -1928,6 +1928,17 @@ class WorkspaceExecOutput(ToolResponse):
     workspace_fingerprint: Sha256
     execution_evidence: ExecutionEvidenceModel | None = None
     adhoc_evidence: AdhocEvidence | None = None
+    framework_overhead_ms: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Time spent around the delegated command(s), excluding their own reported "
+            "duration_ms -- populated only for the #378 inline fast path (a foreground "
+            "call that skipped the durable work queue entirely). Null for a "
+            "background=true/durable result, whose queue+worker round trip this field "
+            "does not measure."
+        ),
+    )
 
 
 class ShippingChangeLimits(StrictModel):

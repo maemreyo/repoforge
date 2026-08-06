@@ -236,6 +236,13 @@ class RepositoryConfig:
     execution_mode: ExecutionMode = ExecutionMode.STRICT
     adhoc_runners: tuple[str, ...] = ()
     adhoc_timeout_seconds: int = 300
+    #: Ceiling for the #378 inline fast path -- a foreground (background=false) ad-hoc/
+    #: workspace_exec call that would otherwise go through the durable work queue instead
+    #: runs directly, bounded by whichever of this and adhoc_timeout_seconds is smaller.
+    #: Deliberately separate from adhoc_timeout_seconds: raising the durable budget for an
+    #: occasional long reviewed command must not silently make every ordinary short call
+    #: block the calling connection for that same long budget before failing.
+    adhoc_inline_max_seconds: int = 10
     #: Separate, narrower allowlist for the reviewed shell-script execution form (#377):
     #: interpreters here (e.g. "sh", "bash") receive a multiline script body, not a single
     #: parsed argv. Deliberately does not extend adhoc_runners: enabling this is the same
@@ -1552,6 +1559,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             3_600,
             f"repositories.{repo_id}.adhoc_timeout_seconds",
         )
+        adhoc_inline_max_seconds = _bounded_int(
+            repo_raw.get("adhoc_inline_max_seconds"),
+            10,
+            1,
+            3_600,
+            f"repositories.{repo_id}.adhoc_inline_max_seconds",
+        )
         trusted_host_enabled = _boolean(
             repo_raw.get("trusted_host_enabled"),
             False,
@@ -1646,6 +1660,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             adhoc_runners=adhoc_runners,
             adhoc_shell_runners=adhoc_shell_runners,
             adhoc_timeout_seconds=adhoc_timeout_seconds,
+            adhoc_inline_max_seconds=adhoc_inline_max_seconds,
             execution_profiles=execution_profiles,
             credential_profiles=credential_profiles,
             trusted_host_enabled=trusted_host_enabled,

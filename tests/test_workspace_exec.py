@@ -8,14 +8,16 @@ same tool's contract.
 already covers in depth (`WorkspaceAdhocRunner`, `classify_adhoc_command`, config
 parsing/validation) rather than reimplementing it, so this file does not re-prove that
 machinery from scratch. It exists to prove the NEW surface: that `workspace_exec` reaches
-the same guards through the durable admission queue (like `workspace_verify(mode="adhoc")`,
-unlike the self-admitting `workspace_run_adhoc` service method), and that its own leaner
-output contract projects the right evidence.
+the same guards it always did, and that its own leaner output contract projects the right
+evidence.
 
-Every call goes through the durable work queue, exactly like `workspace_verify(mode="adhoc")`
--- a foreground call bounded-waits on its operation, so a worker has to claim the item for the
-call to return a terminal result (`durable_worker`, same helper `test_workspace_adhoc.py`
-uses for its own `_verify_adhoc` calls).
+Since #378, a default (background=False) call runs through the inline fast path -- it
+calls `WorkspaceAdhocRunner` directly and never touches the durable work queue at all,
+so `durable_worker` (still used below, exactly like `test_workspace_adhoc.py`'s own
+`_verify_adhoc` calls) is a harmless no-op for these calls: nothing is ever queued for it
+to claim. Only an explicit `background=True` call still goes through admission + a real
+worker claim -- see `tests/test_workspace_exec_inline.py` for the tests that pin down the
+inline/durable split itself (no durable record, ceiling fail-fast, framework_overhead_ms).
 """
 
 from __future__ import annotations
@@ -459,12 +461,13 @@ def test_exec_can_read_supplied_standard_input(tmp_path: Path) -> None:
 
 
 def test_exec_stdin_is_bounded(tmp_path: Path) -> None:
-    """The durable work queue's own state-size ceiling is reached before the
-    adhoc-specific stdin-length guard (`ADHOC_ARGV_INVALID`) ever runs -- unlike
+    """A default (background=False) call now runs through the #378 inline fast path,
+    which validates stdin length before anything is persisted -- exactly like
     `workspace_run_adhoc`'s self-admitting path (test_workspace_adhoc.py's
-    `test_adhoc_stdin_is_bounded`), which validates before anything is persisted.
-    Both fail closed; this asserts what is actually true for the durable path
-    rather than assuming parity with the other one."""
+    `test_adhoc_stdin_is_bounded`), raising `ADHOC_ARGV_INVALID`. An explicit
+    `background=true` call still goes through the durable work queue, whose own
+    state-size ceiling (`STATE_TOO_LARGE`) is reached first since the oversized
+    payload is persisted before the ad-hoc guard ever runs."""
     env = _relaxed_env(tmp_path)
     workspace_id = env.service.workspace_create("demo", "exec stdin bound")["workspace_id"]
 
@@ -475,8 +478,17 @@ def test_exec_stdin_is_bounded(tmp_path: Path) -> None:
             ("python3", "-c", "pass"),
             stdin_text="x" * (MAX_ADHOC_STDIN_LENGTH + 1),
         )
+    assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID
 
-    assert exc.value.code is ErrorCode.STATE_TOO_LARGE
+    with pytest.raises(RepoForgeError) as background_exc:
+        _exec(
+            env,
+            workspace_id,
+            ("python3", "-c", "pass"),
+            stdin_text="x" * (MAX_ADHOC_STDIN_LENGTH + 1),
+            background=True,
+        )
+    assert background_exc.value.code is ErrorCode.STATE_TOO_LARGE
 
 
 def test_exec_audit_records_stdin_length_but_never_its_content(tmp_path: Path) -> None:

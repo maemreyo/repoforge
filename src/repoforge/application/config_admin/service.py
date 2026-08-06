@@ -170,6 +170,7 @@ _EXECUTION_FIELDS = (
     "adhoc_runners",
     "adhoc_shell_runners",
     "adhoc_timeout_seconds",
+    "adhoc_inline_max_seconds",
     "execution_profiles",
     "credential_profiles",
     "trusted_host_enabled",
@@ -245,6 +246,18 @@ def _canonical_execution(raw: dict[str, Any] | None, repo_id: str) -> dict[str, 
                 f"1..{MAX_ADHOC_TIMEOUT_SECONDS}"
             )
         canonical["adhoc_timeout_seconds"] = timeout
+    inline_max = raw.get("adhoc_inline_max_seconds")
+    if inline_max is not None:
+        if (
+            not isinstance(inline_max, int)
+            or isinstance(inline_max, bool)
+            or not 1 <= inline_max <= MAX_ADHOC_TIMEOUT_SECONDS
+        ):
+            raise ConfigError(
+                "repo_policy execution.adhoc_inline_max_seconds must be an integer in "
+                f"1..{MAX_ADHOC_TIMEOUT_SECONDS}"
+            )
+        canonical["adhoc_inline_max_seconds"] = inline_max
     trusted_host_enabled = raw.get("trusted_host_enabled")
     if trusted_host_enabled is not None:
         if not isinstance(trusted_host_enabled, bool):
@@ -386,6 +399,7 @@ class ConfigAdminService:
                 "execution_mode": entry.get("execution_mode", "strict"),
                 "adhoc_runners": entry.get("adhoc_runners", []),
                 "adhoc_timeout_seconds": entry.get("adhoc_timeout_seconds", 300),
+                "adhoc_inline_max_seconds": entry.get("adhoc_inline_max_seconds", 10),
                 "execution_profiles": entry.get("execution_profiles", []),
                 "credential_profiles": entry.get("credential_profiles", []),
                 "profiles": entry.get("profiles", {}),
@@ -1344,6 +1358,7 @@ class ConfigAdminService:
         adhoc_runners: list[str] | None = None,
         adhoc_shell_runners: list[str] | None = None,
         adhoc_timeout_seconds: int | None = None,
+        adhoc_inline_max_seconds: int | None = None,
         execution_profiles: list[str] | None = None,
         credential_profiles: list[str] | None = None,
         trusted_host_enabled: bool | None = None,
@@ -1373,6 +1388,7 @@ class ConfigAdminService:
             adhoc_runners=adhoc_runners,
             adhoc_shell_runners=adhoc_shell_runners,
             adhoc_timeout_seconds=adhoc_timeout_seconds,
+            adhoc_inline_max_seconds=adhoc_inline_max_seconds,
             execution_profiles=execution_profiles,
             credential_profiles=credential_profiles,
             trusted_host_enabled=trusted_host_enabled,
@@ -1700,6 +1716,7 @@ class ConfigAdminService:
         adhoc_runners: list[str] | None,
         adhoc_shell_runners: list[str] | None,
         adhoc_timeout_seconds: int | None,
+        adhoc_inline_max_seconds: int | None,
         execution_profiles: list[str] | None,
         credential_profiles: list[str] | None,
         trusted_host_enabled: bool | None,
@@ -1723,6 +1740,7 @@ class ConfigAdminService:
                     tuple(adhoc_shell_runners) if adhoc_shell_runners is not None else None
                 ),
                 adhoc_timeout_seconds=adhoc_timeout_seconds,
+                adhoc_inline_max_seconds=adhoc_inline_max_seconds,
                 execution_profiles=(
                     tuple(execution_profiles) if execution_profiles is not None else None
                 ),

@@ -708,6 +708,7 @@ def create_forge_environment(
     trusted_host_enabled: bool = False,
     trusted_host_max_lease_ttl_seconds: int = 14_400,
     sandbox_backend_enabled: bool = False,
+    adhoc_inline_max_seconds: int | None = None,
     execution_environment: ExecutionEnvironmentPort | None = None,
 ) -> ForgeEnvironment:
     remote, source = _clone_template_repo(tmp_path)
@@ -760,6 +761,7 @@ credential_profiles = {json.dumps(list(credential_profiles))}
 trusted_host_enabled = {str(trusted_host_enabled).lower()}
 trusted_host_max_lease_ttl_seconds = {trusted_host_max_lease_ttl_seconds}
 sandbox_backend_enabled = {str(sandbox_backend_enabled).lower()}
+{"adhoc_inline_max_seconds = " + str(adhoc_inline_max_seconds) if adhoc_inline_max_seconds is not None else ""}
 {trusted_checkouts_section}
 
 [repositories.demo.profiles.quick]

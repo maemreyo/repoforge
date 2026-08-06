@@ -10,11 +10,11 @@ requires; this module does not remove or alter that path.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field, replace
-from typing import Any
 
-from ...domain.errors import ErrorCode, WorkspaceError
-from ...domain.operation_task import OperationState, OperationTask
+from ...domain.errors import ErrorCode, RepoForgeError, WorkspaceError
+from ...domain.operation_task import OperationTask
 from ...domain.operation_work import OperationWorkRequest
 from ..context import ApplicationContext
 from ..operations import durable_wait
@@ -23,7 +23,9 @@ from ..operations.work_admission import DurableWorkAdmission
 from .run_adhoc import (
     WorkspaceAdhocRunner,
     WorkspaceRunAdhocBackgroundResult,
+    WorkspaceRunAdhocCommand,
     WorkspaceRunAdhocResult,
+    WorkspaceRunAdhocSequenceCommand,
     WorkspaceRunAdhocSequenceResult,
 )
 from .snapshot import WorkspaceSnapshotReader
@@ -98,6 +100,12 @@ class WorkspaceExecResult:
     workspace_fingerprint: str
     execution_evidence: dict[str, object] = field(default_factory=dict)
     adhoc_evidence: dict[str, object] | None = None
+    #: Framework time spent around the delegated command(s) -- total_elapsed_ms minus
+    #: the command's own duration_ms (or the sum of a sequence's per-element
+    #: duration_ms). Populated only for the #378 inline fast path (background=False);
+    #: stays None for a background=True/durable result, whose overhead is not what this
+    #: measures and would misrepresent the queue+worker round trip as "framework cost".
+    framework_overhead_ms: float | None = None
 
 
 class WorkspaceExecutor:
@@ -151,6 +159,16 @@ class WorkspaceExecutor:
                 },
             )
 
+        if not command.background:
+            return self._execute_inline(
+                command, head_sha=head_sha, workspace_fingerprint=workspace_fingerprint
+            )
+
+        # Durable admission path, reached only for background=True: a real async
+        # operation the caller can poll/cancel by operation_id. Unlike the #378 inline
+        # path below, this always returns immediately with a "running" projection --
+        # nothing here calls wait_for_operation, since a caller that wanted to wait
+        # inline would not have set background=True in the first place.
         admitted = self._admission.admit(
             OperationWorkRequest.adhoc(
                 workspace_id=command.workspace_id,
@@ -171,34 +189,89 @@ class WorkspaceExecutor:
             operation_kind="workspace_run_adhoc",
         )
         task: OperationTask = admitted
-        stored: dict[str, Any] | None = None
-        if not command.background:
-            task, stored = durable_wait.wait_for_operation(
-                self.ctx, self._operations, admitted.operation_id
-            )
-        delegated: (
-            WorkspaceRunAdhocResult
-            | WorkspaceRunAdhocSequenceResult
-            | WorkspaceRunAdhocBackgroundResult
+        delegated = WorkspaceRunAdhocBackgroundResult(
+            operation_id=admitted.operation_id,
+            phase=task.phase,
+            safe_next_action=_WAIT_SAFE_NEXT_ACTION.format(operation_id=admitted.operation_id),
         )
-        if task.state is OperationState.SUCCEEDED and stored is not None:
-            delegated = (
-                WorkspaceRunAdhocSequenceResult(**stored)
-                if command.argv_sequence is not None
-                else WorkspaceRunAdhocResult(**stored)
-            )
-        else:
-            delegated = WorkspaceRunAdhocBackgroundResult(
-                operation_id=admitted.operation_id,
-                phase=task.phase,
-                safe_next_action=_WAIT_SAFE_NEXT_ACTION.format(operation_id=admitted.operation_id),
-            )
         result = self._project(
             command, delegated, head_sha=head_sha, workspace_fingerprint=workspace_fingerprint
         )
-        if isinstance(delegated, WorkspaceRunAdhocBackgroundResult):
-            result = replace(result, operation=durable_wait.operation_projection(task))
-        return result
+        return replace(result, operation=durable_wait.operation_projection(task))
+
+    def _execute_inline(
+        self,
+        command: WorkspaceExecCommand,
+        *,
+        head_sha: str,
+        workspace_fingerprint: str,
+    ) -> WorkspaceExecResult:
+        """The #378 fast path for a foreground (background=False) call: run the
+        reviewed command directly through WorkspaceAdhocRunner instead of admitting it
+        to the durable work queue and polling for a worker to claim it. Every check
+        execute()/execute_sequence() perform still applies unchanged (see that
+        docstring) -- this only removes the queue write and poll wait around them, so
+        no durable operation record is ever created here, whether the command succeeds
+        or fails. expected_head_sha/expected_fingerprint are bound to this call's own
+        freshly captured snapshot (not the caller's optional review lock, already
+        checked above), exactly like the durable path's OperationWorkRequest.adhoc()
+        binds to the same values.
+        """
+        started = time.monotonic()
+        delegated: WorkspaceRunAdhocResult | WorkspaceRunAdhocSequenceResult
+        delegated_duration_ms: float
+        if command.argv_sequence is not None:
+            sequence_result = self._adhoc.execute_sequence(
+                WorkspaceRunAdhocSequenceCommand(
+                    workspace_id=command.workspace_id,
+                    argv_sequence=command.argv_sequence,
+                    working_directory=command.working_directory,
+                    expected_fingerprint=workspace_fingerprint,
+                    expected_head_sha=head_sha,
+                    mutability=command.mutability,
+                    declared_effect=command.declared_effect,
+                    lease_token=command.lease_token,
+                    sandbox_requested=command.sandbox_requested,
+                    run_inline=True,
+                )
+            )
+            delegated = sequence_result
+            delegated_duration_ms = 0.0
+            for item in sequence_result.commands:
+                item_duration = item.get("duration_ms")
+                if isinstance(item_duration, (int, float)):
+                    delegated_duration_ms += item_duration
+        else:
+            single_result = self._adhoc.execute(
+                WorkspaceRunAdhocCommand(
+                    workspace_id=command.workspace_id,
+                    argv=command.argv,
+                    script=command.script,
+                    shell=command.shell,
+                    working_directory=command.working_directory,
+                    background=False,
+                    expected_fingerprint=workspace_fingerprint,
+                    expected_head_sha=head_sha,
+                    mutability=command.mutability,
+                    stdin_text=command.stdin_text,
+                    declared_effect=command.declared_effect,
+                    lease_token=command.lease_token,
+                    sandbox_requested=command.sandbox_requested,
+                    run_inline=True,
+                )
+            )
+            if not isinstance(single_result, WorkspaceRunAdhocResult):
+                raise RepoForgeError(
+                    "Inline ad-hoc execution returned a background operation",
+                    code=ErrorCode.INTERNAL_ERROR,
+                )
+            delegated = single_result
+            delegated_duration_ms = single_result.duration_ms
+        overhead_ms = max(0.0, (time.monotonic() - started) * 1000 - delegated_duration_ms)
+        result = self._project(
+            command, delegated, head_sha=head_sha, workspace_fingerprint=workspace_fingerprint
+        )
+        return replace(result, framework_overhead_ms=round(overhead_ms, 3))
 
     @staticmethod
     def _project(

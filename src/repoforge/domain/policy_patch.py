@@ -398,6 +398,7 @@ class RepositoryPolicyPatch:
     adhoc_runners: tuple[str, ...] | None = None
     adhoc_shell_runners: tuple[str, ...] | None = None
     adhoc_timeout_seconds: int | None = None
+    adhoc_inline_max_seconds: int | None = None
     execution_profiles: tuple[str, ...] | None = None
     credential_profiles: tuple[str, ...] | None = None
     trusted_host_enabled: bool | None = None
@@ -449,6 +450,14 @@ class RepositoryPolicyPatch:
         ):
             raise PolicyPatchError(
                 f"adhoc_timeout_seconds must be an integer in 1..{MAX_ADHOC_TIMEOUT_SECONDS}"
+            )
+        if self.adhoc_inline_max_seconds is not None and (
+            not isinstance(self.adhoc_inline_max_seconds, int)
+            or isinstance(self.adhoc_inline_max_seconds, bool)
+            or not 1 <= self.adhoc_inline_max_seconds <= MAX_ADHOC_TIMEOUT_SECONDS
+        ):
+            raise PolicyPatchError(
+                f"adhoc_inline_max_seconds must be an integer in 1..{MAX_ADHOC_TIMEOUT_SECONDS}"
             )
         if self.trusted_host_enabled is not None and not isinstance(
             self.trusted_host_enabled, bool
@@ -529,6 +538,7 @@ class RepositoryPolicyPatch:
             or self.adhoc_runners is not None
             or self.adhoc_shell_runners is not None
             or self.adhoc_timeout_seconds is not None
+            or self.adhoc_inline_max_seconds is not None
             or self.execution_profiles is not None
             or self.credential_profiles is not None
             or self.trusted_host_enabled is not None
@@ -584,6 +594,11 @@ class RepositoryPolicyPatch:
                 if other.adhoc_timeout_seconds is not None
                 else self.adhoc_timeout_seconds
             ),
+            adhoc_inline_max_seconds=(
+                other.adhoc_inline_max_seconds
+                if other.adhoc_inline_max_seconds is not None
+                else self.adhoc_inline_max_seconds
+            ),
             execution_profiles=(
                 other.execution_profiles
                 if other.execution_profiles is not None
@@ -624,6 +639,8 @@ class RepositoryPolicyPatch:
             table["adhoc_shell_runners"] = list(self.adhoc_shell_runners)
         if self.adhoc_timeout_seconds is not None:
             table["adhoc_timeout_seconds"] = self.adhoc_timeout_seconds
+        if self.adhoc_inline_max_seconds is not None:
+            table["adhoc_inline_max_seconds"] = self.adhoc_inline_max_seconds
         if self.execution_profiles is not None:
             table["execution_profiles"] = list(self.execution_profiles)
         if self.credential_profiles is not None:
@@ -664,6 +681,7 @@ class RepositoryPolicyPatch:
                 "adhoc_runners",
                 "adhoc_shell_runners",
                 "adhoc_timeout_seconds",
+                "adhoc_inline_max_seconds",
                 "execution_profiles",
                 "credential_profiles",
                 "trusted_host_enabled",
@@ -704,6 +722,7 @@ class RepositoryPolicyPatch:
                 else None
             ),
             adhoc_timeout_seconds=raw.get("adhoc_timeout_seconds"),
+            adhoc_inline_max_seconds=raw.get("adhoc_inline_max_seconds"),
             execution_profiles=(
                 tuple(raw["execution_profiles"])
                 if isinstance(raw.get("execution_profiles"), (list, tuple))

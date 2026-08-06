@@ -125,6 +125,13 @@ class WorkspaceRunAdhocCommand:
     #: see the live re-check in execute()/execute_sequence().
     sandbox_requested: bool = False
     cancellation_token: CancellationToken | None = None
+    #: Internal marker (#378), never caller-supplied: set only by WorkspaceExecutor's
+    #: inline fast path (a foreground call that skips durable admission entirely).
+    #: Distinct from `background` -- execute_claimed() already forces background=False
+    #: for every durably-claimed call too, so background alone cannot tell "ran inline"
+    #: apart from "claimed off the durable queue". When true, the effective timeout is
+    #: capped at repo.adhoc_inline_max_seconds (see execute()).
+    run_inline: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +187,10 @@ class WorkspaceRunAdhocSequenceCommand:
     durable-admission-queue path, not the older self-admitting workspace_run_adhoc
     service method -- so there is no separate background field here: foreground vs.
     background is entirely an operation-admission concern the durable queue already
-    handles (see WorkspaceExecutor), identical for a single command or a sequence."""
+    handles (see WorkspaceExecutor), identical for a single command or a sequence.
+    `run_inline` (#378) is the one exception: WorkspaceExecutor's inline fast path sets
+    it to bypass that same admission queue for a foreground sequence, exactly as it does
+    for a single WorkspaceRunAdhocCommand."""
 
     workspace_id: str
     argv_sequence: tuple[tuple[str, ...], ...]
@@ -192,6 +202,7 @@ class WorkspaceRunAdhocSequenceCommand:
     lease_token: str | None = None
     sandbox_requested: bool = False
     cancellation_token: CancellationToken | None = None
+    run_inline: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,8 +266,18 @@ def _resolve_declared_effect(declared_effect: str | None, mutability: str) -> Ef
 _MAX_ADHOC_TIMEOUT_SECONDS = 3_600
 
 
-def _adhoc_timeout_remedy(budget_seconds: int) -> str:
+def _adhoc_timeout_remedy(budget_seconds: int, *, inline: bool = False) -> str:
     """Name the budget that expired, and the two legitimate ways past it."""
+    if inline:
+        return (
+            f"This inline ad-hoc call was capped at {budget_seconds}s "
+            "(repositories.<id>.adhoc_inline_max_seconds) -- a smaller ceiling than "
+            f"adhoc_timeout_seconds that only bounds the foreground fast path, so that an "
+            "ordinary short call cannot block the calling connection for the full durable "
+            "budget before failing. Resubmit the same call with background=true to run it "
+            "through the durably-tracked path instead, which gets the full adhoc_timeout_seconds "
+            "budget and a pollable operation_id."
+        )
     return (
         f"The ad-hoc budget for this repository is {budget_seconds}s "
         "(repositories.<id>.adhoc_timeout_seconds), not a platform limit: an operator can raise it "
@@ -492,6 +513,16 @@ class WorkspaceAdhocRunner:
         *,
         progress: Callable[[str, int, int, str, str], None] | None = None,
     ) -> WorkspaceRunAdhocResult | WorkspaceRunAdhocBackgroundResult:
+        """Run one reviewed ad-hoc command -- durably admitted (execute_claimed()) or,
+        for a foreground call, run directly by WorkspaceExecutor's #378 inline fast path
+        (run_inline=True). Either way, exactly the same checks apply below, in order:
+        argv/script/mutability validation, classify_adhoc_effect + the #385 circuit
+        breakers, the #407 protected-ref check, credential-profile resolution, #383
+        trusted_host lease / #384 sandboxed_turbo resolution, and ExecutionCoordinator's
+        own identity/policy enforcement (self.ctx.execution.prepare()). None of this is
+        inherited from workspace_verify's full assessment (pr_status.py/base_status.py/
+        code_intelligence.py/assessment.py) -- the ad-hoc path never imports from there;
+        this docstring only makes explicit what was already true."""
         record, repo, path = self.ctx.workspace(c.workspace_id)
         lease = _resolve_lease_for_command(
             self.ctx,
@@ -614,7 +645,13 @@ class WorkspaceAdhocRunner:
                 # field rather than a platform limit -- is known here, and withholding it
                 # is what makes an agent invent a chunked workaround for a job that simply
                 # needed a bigger budget or a profile of its own.
-                exc.safe_next_action = _adhoc_timeout_remedy(repo.adhoc_timeout_seconds)
+                if c.run_inline:
+                    exc.safe_next_action = _adhoc_timeout_remedy(
+                        min(repo.adhoc_timeout_seconds, repo.adhoc_inline_max_seconds),
+                        inline=True,
+                    )
+                else:
+                    exc.safe_next_action = _adhoc_timeout_remedy(repo.adhoc_timeout_seconds)
             if exc.code is ErrorCode.NOT_FOUND and not exc.safe_next_action:
                 executable = exc.details.get("executable")
                 if isinstance(executable, str):
@@ -670,13 +707,18 @@ class WorkspaceAdhocRunner:
                 result: CommandResult | None = None
                 command_error: CommandError | None = None
                 execution_evidence_data: dict[str, object] = {}
+                effective_timeout = (
+                    min(locked_repo.adhoc_timeout_seconds, locked_repo.adhoc_inline_max_seconds)
+                    if c.run_inline
+                    else locked_repo.adhoc_timeout_seconds
+                )
                 execution_request = adhoc_execution_request(
                     workspace_id=c.workspace_id,
                     workspace_root=locked_workspace,
                     command_cwd=command_cwd,
                     argv=argv,
                     working_directory_policy=c.working_directory or ".",
-                    timeout_seconds=locked_repo.adhoc_timeout_seconds,
+                    timeout_seconds=effective_timeout,
                     output_limit=self.ctx.config.server.max_tool_output_chars,
                     cancel_token=cancel_token,
                     stdin_text=stdin_text,
@@ -958,8 +1000,15 @@ class WorkspaceAdhocRunner:
                 # One total budget for the whole sequence, not `adhoc_timeout_seconds`
                 # per element: without this, an N-element sequence could hold the
                 # workspace lock for up to N times the repository's single-command
-                # budget (review finding F-007).
-                sequence_deadline = time.monotonic() + locked_repo.adhoc_timeout_seconds
+                # budget (review finding F-007). An inline (#378) sequence uses the
+                # smaller adhoc_inline_max_seconds ceiling instead, same as a single
+                # inline command.
+                sequence_budget_seconds = (
+                    min(locked_repo.adhoc_timeout_seconds, locked_repo.adhoc_inline_max_seconds)
+                    if c.run_inline
+                    else locked_repo.adhoc_timeout_seconds
+                )
+                sequence_deadline = time.monotonic() + sequence_budget_seconds
                 for index, argv in enumerate(validated):
                     remaining = sequence_deadline - time.monotonic()
                     if remaining <= 0:
@@ -968,17 +1017,19 @@ class WorkspaceAdhocRunner:
                         audit_details["stop_reason"] = "sequence_budget_exhausted"
                         command_error = CommandError(
                             "SEQUENCE_BUDGET_EXHAUSTED: this sequence's total time "
-                            f"budget ({locked_repo.adhoc_timeout_seconds}s) was exhausted "
+                            f"budget ({sequence_budget_seconds}s) was exhausted "
                             f"before element {index + 1}/{len(validated)} could start",
                             code=ErrorCode.COMMAND_TIMEOUT,
                             retryable=False,
                             safe_next_action=(
-                                "Split this into fewer commands per call, or ask the "
+                                _adhoc_timeout_remedy(sequence_budget_seconds, inline=True)
+                                if c.run_inline
+                                else "Split this into fewer commands per call, or ask the "
                                 "repository owner to raise adhoc_timeout_seconds."
                             ),
                         )
                         break
-                    element_timeout = max(1, min(locked_repo.adhoc_timeout_seconds, int(remaining)))
+                    element_timeout = max(1, min(sequence_budget_seconds, int(remaining)))
                     started = time.monotonic()
                     execution_request = adhoc_execution_request(
                         workspace_id=c.workspace_id,

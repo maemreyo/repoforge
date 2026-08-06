@@ -650,6 +650,7 @@ _REPO_RECOGNIZED = {
     "adhoc_runners",
     "adhoc_shell_runners",
     "adhoc_timeout_seconds",
+    "adhoc_inline_max_seconds",
     "execution_profiles",
     "credential_profiles",
     "trusted_host_enabled",
@@ -1033,6 +1034,13 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             left.get("adhoc_timeout_seconds", 300),
             right.get("adhoc_timeout_seconds", 300),
             reason="ad-hoc process duration",
+        )
+        _record_number(
+            changes,
+            prefix + ".adhoc_inline_max_seconds",
+            left.get("adhoc_inline_max_seconds", 10),
+            right.get("adhoc_inline_max_seconds", 10),
+            reason="inline ad-hoc fast-path ceiling",
         )
         left_trusted_host = bool(left.get("trusted_host_enabled", False))
         right_trusted_host = bool(right.get("trusted_host_enabled", False))
