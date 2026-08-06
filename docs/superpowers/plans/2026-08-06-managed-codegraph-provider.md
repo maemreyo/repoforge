@@ -210,18 +210,18 @@ Evidence: focused RED failed on the absent adapter/config binding; focused GREEN
 - Test: `tests/test_codegraph_projection.py`
 
 **Interfaces:**
-- Produces: `ProjectionManifest`, `ProjectionResult`, `CodeGraphProjection.prepare(request, options)` and `invalidate(workspace_id)`.
+- Produces: `ProjectionManifest`, `ProjectionResult`, `CodeGraphProjection.prepare(request, options)`, `mark_complete(workspace_id, manifest_digest)`, and `invalidate(workspace_id)`.
 - Consumes: `CodeIntelligenceRequest`, repository-relative allowed paths, state root, and lock manager.
 
-- [ ] **Step 1: Write failing projection tests**
+- [x] **Step 1: Write failing projection tests**
 
 Cover allowed regular files, denied paths, symlinks, oversized files, file/byte budgets, deleted files, deterministic manifest digest, atomic incomplete marker, unchanged worktree Git status, and failed-sync invalidation.
 
-- [ ] **Step 2: Run tests and prove RED**
+- [x] **Step 2: Run tests and prove RED**
 
 Run: `pytest tests/test_codegraph_projection.py -q`
 
-- [ ] **Step 3: Implement external managed layout**
+- [x] **Step 3: Implement external managed layout**
 
 ```text
 <state_root>/providers/codegraph/workspaces/<workspace_id>/
@@ -233,15 +233,17 @@ Run: `pytest tests/test_codegraph_projection.py -q`
 
 Materialize through sibling temporary files plus `os.replace`, never follow symlinks, and reject any resolved path escaping `workspace_root`.
 
-- [ ] **Step 4: Implement manifest identity and invalidation**
+- [x] **Step 4: Implement manifest identity and invalidation**
 
-The manifest records snapshot id, policy digest, ordered path/content digests, file/byte totals, adapter schema version, and `complete=true`. Create `INCOMPLETE` before mutation; remove it only after validated status. Any failure removes the published manifest and leaves `INCOMPLETE`.
+The manifest records snapshot id, selection-policy digest, options digest, ordered path/content digests, file/byte totals, and adapter schema version. Create `INCOMPLETE` before mutation; `prepare()` publishes only the source manifest and leaves the marker in place. Only `mark_complete()` with the exact manifest digest, called after validated CodeGraph status, removes it. Any failure removes the published manifest and leaves `INCOMPLETE`; `invalidate()` also removes the managed index to force a full rebuild.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 Run: `pytest tests/test_codegraph_projection.py -q`
 
 Commit: `feat(codegraph): add managed snapshot projection`
+
+Evidence: initial RED failed on absent projection modules; follow-up RED cycles caught denied-path overlap, managed-state/index symlinks, unknown manifest fields, premature completion, and missing policy binding. Focused GREEN passed 61 projection/provider tests with Ruff, strict mypy, catalog ownership, and every new file below 400 lines.
 
 ### Task 4: Contained one-shot command boundary
 
