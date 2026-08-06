@@ -15,11 +15,13 @@ import sys
 import tempfile
 import time
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
 from repoforge import __version__
 
+from ...adapters.persistence.json_lease_store import JsonHostBypassLeaseStore
 from ...application.activation.contract_identity import (
     ContractIdentityReport,
     build_contract_identity_report,
@@ -133,6 +135,11 @@ from ...domain.errors import (
     operation_error_from_exception,
 )
 from ...domain.execution_worker import ExecutionWorkerQuarantineReceipt
+from ...domain.host_bypass_lease import (
+    HostBypassLease,
+    mint_lease_token,
+    validate_lease_grant,
+)
 from ...domain.redaction import redact_text
 from ...domain.repository_proposal import EnrollmentMode, RepositoryProposal
 from ...domain.runtime import ControlCommand, ControlRequest, RuntimePhase
@@ -628,6 +635,120 @@ def _config_reject(config_path: Path, change_id: str) -> int:
             "change_id": change_id,
             "repo_id": record.get("repo_id"),
             "unchanged_state": ["configuration", "runtime"],
+        }
+    )
+    return 0
+
+
+def _trust_grant(config_path: Path, args: argparse.Namespace) -> int:
+    """`rf trust grant` (#383): mint one ephemeral `trusted_host` lease instance.
+
+    Deliberately does not touch the config-generation store: a lease is the ephemeral
+    instance side of the two-tier model (autonomy-policy-model.md §7), not a capability
+    expansion -- only `repositories.<id>.trusted_host_enabled` (via `rf config
+    edit`/`approve`) is that. The lease is stamped with the *current* generation's id and
+    resolved digest purely as durable evidence of which policy was in effect when it was
+    granted.
+    """
+    store = _ensure_generation(config_path)
+    generation = store.current()
+    if generation is None:
+        raise ConfigError("No accepted configuration generation")
+    config = load_config(config_path)
+    repo = config.repositories.get(args.repo_id)
+    if repo is None:
+        raise ConfigError(f"Unknown repository id: {args.repo_id}")
+    if not repo.trusted_host_enabled:
+        raise ConfigError(
+            f"repositories.{args.repo_id}.trusted_host_enabled is false; enable it via "
+            "`rf config edit` + `rf config approve` before granting a trusted_host lease."
+        )
+    ttl_seconds = validate_lease_grant(
+        branch_or_ref=args.branch,
+        protected_branches=repo.protected_branches,
+        requested_ttl_seconds=args.ttl_seconds,
+        max_ttl_seconds=repo.trusted_host_max_lease_ttl_seconds,
+    )
+    raw_token, token_hash = mint_lease_token()
+    now = datetime.now(timezone.utc)
+    lease = HostBypassLease(
+        lease_id=f"lease-{id_generator().new_hex(24)}",
+        repository_identity=args.repo_id,
+        checkout_identity=args.checkout,
+        workspace_kind=args.workspace_kind,
+        branch_or_ref=args.branch,
+        allowed_effects=tuple(args.effects or ("broad_shell",)),
+        host_effect_scope=tuple(args.host_effects or ()),
+        credential_profile_ids=tuple(args.credential_profiles or ()),
+        granted_by=os.environ.get("USER", "local-operator"),
+        principal_token_hash=token_hash,
+        config_generation=str(generation.generation),
+        policy_digest=generation.resolved_sha256,
+        issued_at=now,
+        expires_at=now + timedelta(seconds=ttl_seconds),
+    )
+    lease_store = JsonHostBypassLeaseStore(_state_root(config_path), _locks(config_path))
+    lease_store.create(lease)
+    _json(
+        {
+            "status": "granted",
+            "lease_id": lease.lease_id,
+            "lease_token": raw_token,
+            "repo_id": lease.repository_identity,
+            "branch_or_ref": lease.branch_or_ref,
+            "expires_at": lease.expires_at.isoformat(),
+            "safe_next_action": (
+                "Save this token now: it is shown exactly once and is never stored, "
+                "logged, or recoverable. Present it as workspace_exec's lease_token "
+                "argument for the duration of the lease."
+            ),
+        }
+    )
+    return 0
+
+
+def _trust_list(config_path: Path, args: argparse.Namespace) -> int:
+    lease_store = JsonHostBypassLeaseStore(_state_root(config_path), _locks(config_path))
+    now = datetime.now(timezone.utc)
+    records = []
+    for envelope in lease_store.list_records(max_records=500).records:
+        lease = envelope.value
+        if args.repo_id is not None and lease.repository_identity != args.repo_id:
+            continue
+        records.append(
+            {
+                "lease_id": lease.lease_id,
+                "repo_id": lease.repository_identity,
+                "checkout_identity": lease.checkout_identity,
+                "branch_or_ref": lease.branch_or_ref,
+                "allowed_effects": list(lease.allowed_effects),
+                "granted_by": lease.granted_by,
+                "issued_at": lease.issued_at.isoformat(),
+                "expires_at": lease.expires_at.isoformat(),
+                "revoked_at": lease.revoked_at.isoformat() if lease.revoked_at else None,
+                "status": lease.status(now=now).value,
+            }
+        )
+    _json({"status": "ok", "leases": records})
+    return 0
+
+
+def _trust_revoke(config_path: Path, lease_id: str) -> int:
+    lease_store = JsonHostBypassLeaseStore(_state_root(config_path), _locks(config_path))
+    envelope = lease_store.read(lease_id)
+    if envelope is None:
+        raise ConfigError(f"Unknown lease id: {lease_id}")
+    now = datetime.now(timezone.utc)
+    revoked = envelope.value.revoke(at=now)
+    lease_store.save(revoked, expected_revision=envelope.revision)
+    _json(
+        {
+            "status": "revoked",
+            "lease_id": lease_id,
+            "revoked_at": now.isoformat(),
+            "unchanged_state": [
+                "New process launches under this lease are blocked immediately.",
+            ],
         }
     )
     return 0
@@ -2633,6 +2754,28 @@ def build_parser() -> argparse.ArgumentParser:
     config_approve.add_argument("--activate", choices=("auto", "always", "never"), default="auto")
     config_reject = config_sub.add_parser("reject")
     config_reject.add_argument("change_id")
+    trust = commands.add_parser("trust")
+    trust_sub = trust.add_subparsers(dest="trust_command", required=True)
+    trust_grant = trust_sub.add_parser("grant")
+    trust_grant.add_argument("repo_id")
+    trust_grant.add_argument("--branch", required=True)
+    trust_grant.add_argument("--checkout", required=True)
+    trust_grant.add_argument(
+        "--workspace-kind",
+        dest="workspace_kind",
+        choices=("managed_worktree", "adopted_worktree", "attached_shared"),
+        default="attached_shared",
+    )
+    trust_grant.add_argument("--ttl-seconds", dest="ttl_seconds", type=int, default=1_800)
+    trust_grant.add_argument("--effects", action="append", default=[])
+    trust_grant.add_argument("--host-effects", dest="host_effects", action="append", default=[])
+    trust_grant.add_argument(
+        "--credential-profiles", dest="credential_profiles", action="append", default=[]
+    )
+    trust_list = trust_sub.add_parser("list")
+    trust_list.add_argument("--repo-id", dest="repo_id", default=None)
+    trust_revoke = trust_sub.add_parser("revoke")
+    trust_revoke.add_argument("lease_id")
     show_config = commands.add_parser("show-config")
     show_config.add_argument("--origin", action="store_true")
     commands.add_parser("doctor")
@@ -2826,6 +2969,13 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             return 0
+        if args.command == "trust":
+            if args.trust_command == "grant":
+                return _trust_grant(config_path, args)
+            if args.trust_command == "list":
+                return _trust_list(config_path, args)
+            if args.trust_command == "revoke":
+                return _trust_revoke(config_path, args.lease_id)
         store = _ensure_generation(config_path)
         if args.command == "diagnostics":
             runtime = _runtime_status(store)

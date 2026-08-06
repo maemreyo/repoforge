@@ -575,7 +575,10 @@ def scan_script_for_blocked_git_forms(script: str) -> None:
 
 
 def validate_adhoc_sequence(
-    sequence: tuple[tuple[str, ...], ...], runners: tuple[str, ...]
+    sequence: tuple[tuple[str, ...], ...],
+    runners: tuple[str, ...],
+    *,
+    bypass_runner_allowlist: bool = False,
 ) -> tuple[tuple[str, ...], ...]:
     """Validate a bounded ordered argv-command sequence (#443).
 
@@ -601,7 +604,12 @@ def validate_adhoc_sequence(
                 f"{MAX_ADHOC_SEQUENCE_LENGTH} commands."
             ),
         )
-    return tuple(validate_adhoc_argv(tuple(element), runners) for element in sequence)
+    return tuple(
+        validate_adhoc_argv(
+            tuple(element), runners, bypass_runner_allowlist=bypass_runner_allowlist
+        )
+        for element in sequence
+    )
 
 
 def _adhoc_error(message: str, code: ErrorCode, *, safe_next_action: str) -> RepoForgeError:
@@ -656,11 +664,22 @@ def _argv_element_violation(element: object) -> tuple[str, str] | None:
     return None
 
 
-def validate_adhoc_argv(argv: tuple[str, ...], runners: tuple[str, ...]) -> tuple[str, ...]:
+def validate_adhoc_argv(
+    argv: tuple[str, ...],
+    runners: tuple[str, ...],
+    *,
+    bypass_runner_allowlist: bool = False,
+) -> tuple[str, ...]:
     """Validate one ad-hoc argv list against the repository's runner allowlist.
 
-    Never accepts a shell string, a path-form ``argv[0]``, or an unlisted runner.
-    Raises a structured :class:`RepoForgeError` on any violation.
+    Never accepts a shell string or a path-form ``argv[0]``. Rejects an unlisted runner
+    unless ``bypass_runner_allowlist`` is set -- reachable only when a valid #383
+    `trusted_host` lease resolved for this exact repository and branch; every other
+    shape check (element bounds, bare-basename form) still applies unconditionally, and
+    a bypassed argv is still content-inspected and protected-ref-checked exactly like
+    any other (domain/adhoc.py's git-content guard, application/workspace/run_adhoc.py's
+    push destination check). Raises a structured :class:`RepoForgeError` on any
+    violation.
     """
     if not isinstance(argv, (list, tuple)) or not argv or len(argv) > MAX_ADHOC_ARGV_ELEMENTS:
         raise _adhoc_error(
@@ -687,7 +706,7 @@ def validate_adhoc_argv(argv: tuple[str, ...], runners: tuple[str, ...]) -> tupl
                 "RepoForge resolves it through the constrained runtime PATH."
             ),
         )
-    if runner not in runners:
+    if runner not in runners and not bypass_runner_allowlist:
         raise _adhoc_error(
             f"Ad-hoc runner {runner!r} is not in this repository's adhoc_runners allowlist",
             ErrorCode.ADHOC_RUNNER_NOT_ALLOWED,

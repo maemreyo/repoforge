@@ -169,6 +169,10 @@ def apply_policy_patch(
         repo["execution_profiles"] = list(patch.execution_profiles)
     if patch.credential_profiles is not None:
         repo["credential_profiles"] = list(patch.credential_profiles)
+    if patch.trusted_host_enabled is not None:
+        repo["trusted_host_enabled"] = patch.trusted_host_enabled
+    if patch.trusted_host_max_lease_ttl_seconds is not None:
+        repo["trusted_host_max_lease_ttl_seconds"] = patch.trusted_host_max_lease_ttl_seconds
     profiles = repo.setdefault("profiles", {})
     if not isinstance(profiles, dict):
         raise ValueError(f"repositories.{repo_id}.profiles must be a table")

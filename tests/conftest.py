@@ -695,6 +695,8 @@ def create_forge_environment(
     credential_profiles: tuple[str, ...] = (),
     allowed_mutation_ops: tuple[str, ...] = MUTATION_OPS,
     trusted_external_checkouts: dict[str, str] | None = None,
+    trusted_host_enabled: bool = False,
+    trusted_host_max_lease_ttl_seconds: int = 14_400,
 ) -> ForgeEnvironment:
     remote, source = _clone_template_repo(tmp_path)
 
@@ -743,6 +745,8 @@ adhoc_runners = {json.dumps(list(adhoc_runners))}
 adhoc_shell_runners = {json.dumps(list(adhoc_shell_runners))}
 execution_profiles = {json.dumps(list(execution_profiles))}
 credential_profiles = {json.dumps(list(credential_profiles))}
+trusted_host_enabled = {str(trusted_host_enabled).lower()}
+trusted_host_max_lease_ttl_seconds = {trusted_host_max_lease_ttl_seconds}
 {trusted_checkouts_section}
 
 [repositories.demo.profiles.quick]

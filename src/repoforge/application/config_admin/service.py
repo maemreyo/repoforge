@@ -43,6 +43,7 @@ from ...domain.credential_profiles import validate_credential_profiles
 from ...domain.errors import ConfigError, RepoForgeError
 from ...domain.execution_profiles import validate_execution_profiles
 from ...domain.generated_paths import parse_generated_paths
+from ...domain.host_bypass_lease import MAX_LEASE_TTL_SECONDS
 from ...domain.issue_writes import IssueWritePolicy, IssueWritePolicyError
 from ...domain.policy_patch import (
     MAX_ADHOC_TIMEOUT_SECONDS,
@@ -171,6 +172,8 @@ _EXECUTION_FIELDS = (
     "adhoc_timeout_seconds",
     "execution_profiles",
     "credential_profiles",
+    "trusted_host_enabled",
+    "trusted_host_max_lease_ttl_seconds",
 )
 
 
@@ -241,6 +244,23 @@ def _canonical_execution(raw: dict[str, Any] | None, repo_id: str) -> dict[str, 
                 f"1..{MAX_ADHOC_TIMEOUT_SECONDS}"
             )
         canonical["adhoc_timeout_seconds"] = timeout
+    trusted_host_enabled = raw.get("trusted_host_enabled")
+    if trusted_host_enabled is not None:
+        if not isinstance(trusted_host_enabled, bool):
+            raise ConfigError("repo_policy execution.trusted_host_enabled must be true or false")
+        canonical["trusted_host_enabled"] = trusted_host_enabled
+    lease_ttl_ceiling = raw.get("trusted_host_max_lease_ttl_seconds")
+    if lease_ttl_ceiling is not None:
+        if (
+            not isinstance(lease_ttl_ceiling, int)
+            or isinstance(lease_ttl_ceiling, bool)
+            or not 60 <= lease_ttl_ceiling <= MAX_LEASE_TTL_SECONDS
+        ):
+            raise ConfigError(
+                "repo_policy execution.trusted_host_max_lease_ttl_seconds must be an "
+                f"integer in 60..{MAX_LEASE_TTL_SECONDS}"
+            )
+        canonical["trusted_host_max_lease_ttl_seconds"] = lease_ttl_ceiling
     if not canonical:
         raise ConfigError("repo_policy execution must declare at least one field")
     return canonical
@@ -1320,6 +1340,8 @@ class ConfigAdminService:
         adhoc_timeout_seconds: int | None = None,
         execution_profiles: list[str] | None = None,
         credential_profiles: list[str] | None = None,
+        trusted_host_enabled: bool | None = None,
+        trusted_host_max_lease_ttl_seconds: int | None = None,
         policy_overrides: dict[str, str] | None = None,
         remove_policy_overrides: list[str] | None = None,
         generated_paths: list[dict[str, Any]] | None = None,
@@ -1346,6 +1368,8 @@ class ConfigAdminService:
             adhoc_timeout_seconds=adhoc_timeout_seconds,
             execution_profiles=execution_profiles,
             credential_profiles=credential_profiles,
+            trusted_host_enabled=trusted_host_enabled,
+            trusted_host_max_lease_ttl_seconds=trusted_host_max_lease_ttl_seconds,
         )
         try:
             resolved_generated_paths = (
@@ -1670,6 +1694,8 @@ class ConfigAdminService:
         adhoc_timeout_seconds: int | None,
         execution_profiles: list[str] | None,
         credential_profiles: list[str] | None,
+        trusted_host_enabled: bool | None,
+        trusted_host_max_lease_ttl_seconds: int | None,
     ) -> RepositoryPolicyPatch:
         try:
             profiles = []
@@ -1694,6 +1720,8 @@ class ConfigAdminService:
                 credential_profiles=(
                     tuple(credential_profiles) if credential_profiles is not None else None
                 ),
+                trusted_host_enabled=trusted_host_enabled,
+                trusted_host_max_lease_ttl_seconds=trusted_host_max_lease_ttl_seconds,
                 remove_profiles=tuple(remove_profiles),
                 remove_diagnostics=tuple(remove_diagnostics),
                 remove_formatters=tuple(remove_formatters),

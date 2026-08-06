@@ -79,6 +79,9 @@ class WorkspaceExecCommand:
     mutability: str = "read_only"
     declared_effect: str | None = None
     background: bool = False
+    #: Opaque #383 `trusted_host` lease token (never persisted or echoed back --
+    #: only whether one resolved to an active lease is recorded as evidence).
+    lease_token: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +163,7 @@ class WorkspaceExecutor:
                 config_generation=self.ctx.config_generation,
                 stdin_text=command.stdin_text,
                 declared_effect=command.declared_effect,
+                lease_token=command.lease_token,
             ),
             operation_kind="workspace_run_adhoc",
         )

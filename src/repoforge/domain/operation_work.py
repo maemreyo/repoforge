@@ -51,7 +51,9 @@ _ADHOC_REQUEST_FIELDS = frozenset(
 #: queued by an earlier release survives the activation that adds them. The decoder
 #: stays exact about unknown fields; it is only tolerant about these missing ones.
 _OPTIONAL_REQUEST_FIELDS: dict[str, frozenset[str]] = {
-    "adhoc": frozenset({"stdin_text", "script", "shell", "argv_sequence", "declared_effect"})
+    "adhoc": frozenset(
+        {"stdin_text", "script", "shell", "argv_sequence", "declared_effect", "lease_token"}
+    )
 }
 _DIAGNOSTIC_REQUEST_FIELDS = frozenset(
     {
@@ -106,6 +108,11 @@ class OperationWorkRequest:
     #: see domain.adhoc.EffectClass. Never itself an authorization: no admission check
     #: consults it, only the effect-mismatch evidence comparison does.
     declared_effect: str | None = None
+    #: Opaque #383 `trusted_host` lease token, persisted raw like stdin_text (a queued
+    #: command's own input can already carry secrets) so the worker that eventually
+    #: claims this request can resolve it -- never echoed into audit_details, evidence,
+    #: or the result payload; only whether a lease resolved is recorded.
+    lease_token: str | None = None
 
     def __post_init__(self) -> None:
         """Durable state is the execution authority after crash/retry -- it must not
@@ -216,6 +223,7 @@ class OperationWorkRequest:
         config_generation: int,
         stdin_text: str | None = None,
         declared_effect: str | None = None,
+        lease_token: str | None = None,
     ) -> Self:
         return cls(
             kind="adhoc",
@@ -228,6 +236,7 @@ class OperationWorkRequest:
             mutability=mutability,
             stdin_text=stdin_text,
             declared_effect=declared_effect,
+            lease_token=lease_token,
             expected_head_sha=expected_head_sha,
             expected_fingerprint=expected_fingerprint,
             config_generation=config_generation,
@@ -404,6 +413,7 @@ def work_item_payload(item: OperationWorkItem) -> dict[str, object]:
             "mutability": request.mutability,
             "stdin_text": request.stdin_text,
             "declared_effect": request.declared_effect,
+            "lease_token": request.lease_token,
             "expected_head_sha": request.expected_head_sha,
             "expected_fingerprint": request.expected_fingerprint,
             "config_generation": request.config_generation,
@@ -537,6 +547,11 @@ def work_item_from_payload(payload: dict[str, object]) -> OperationWorkItem:
                 None
                 if request_payload.get("declared_effect") is None
                 else str(request_payload["declared_effect"])
+            ),
+            lease_token=(
+                None
+                if request_payload.get("lease_token") is None
+                else str(request_payload["lease_token"])
             ),
             expected_head_sha=str(request_payload["expected_head_sha"]),
             expected_fingerprint=str(request_payload["expected_fingerprint"]),

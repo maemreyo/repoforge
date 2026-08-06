@@ -258,6 +258,14 @@ class RepositoryConfig:
     #: baseline does not already carry, without widening the baseline for every
     #: repository at once.
     credential_profiles: tuple[str, ...] = ()
+    #: Static capability configuration for #383's `trusted_host` lease -- whether this
+    #: repository may ever have a host-bypass lease granted against it at all, and the
+    #: ceiling on any single grant's TTL. Distinct from an ephemeral lease instance
+    #: (`rf trust grant`), which does not create a new config generation: this field
+    #: changes rarely and is reviewed/approved like any other repository policy,
+    #: exactly the two-tier split autonomy-policy-model.md §7 already names.
+    trusted_host_enabled: bool = False
+    trusted_host_max_lease_ttl_seconds: int = 14_400
     ticket_graph: GitHubTicketGraphConfig | None = None
     generated_paths: tuple[GeneratedPathRule, ...] = ()
     issue_writes: IssueWritePolicy = field(default_factory=IssueWritePolicy)
@@ -1538,6 +1546,18 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             3_600,
             f"repositories.{repo_id}.adhoc_timeout_seconds",
         )
+        trusted_host_enabled = _boolean(
+            repo_raw.get("trusted_host_enabled"),
+            False,
+            f"repositories.{repo_id}.trusted_host_enabled",
+        )
+        trusted_host_max_lease_ttl_seconds = _bounded_int(
+            repo_raw.get("trusted_host_max_lease_ttl_seconds"),
+            14_400,
+            60,
+            14_400,
+            f"repositories.{repo_id}.trusted_host_max_lease_ttl_seconds",
+        )
         trusted_external_checkouts = _load_trusted_external_checkouts(
             repo_raw.get("trusted_external_checkouts"),
             repo_id,
@@ -1617,6 +1637,8 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             adhoc_timeout_seconds=adhoc_timeout_seconds,
             execution_profiles=execution_profiles,
             credential_profiles=credential_profiles,
+            trusted_host_enabled=trusted_host_enabled,
+            trusted_host_max_lease_ttl_seconds=trusted_host_max_lease_ttl_seconds,
             ticket_graph=ticket_graph,
             generated_paths=generated_paths,
             issue_writes=issue_writes,

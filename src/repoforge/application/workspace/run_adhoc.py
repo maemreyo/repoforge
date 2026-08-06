@@ -43,6 +43,7 @@ from ...domain.credential_profiles import resolve_credential_profile_env
 from ...domain.errors import CommandError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ...domain.execution_environment import build_execution_evidence
 from ...domain.execution_profiles import available_execution_profiles
+from ...domain.host_bypass_lease import HostBypassLease, resolve_active_lease
 from ...domain.operation_identity import bind_worker_identity
 from ...domain.operation_task import OperationRetryability, OperationState
 from ...domain.operation_worker import OperationWorkerBinding
@@ -115,6 +116,10 @@ class WorkspaceRunAdhocCommand:
     mutability: str = "read_only"
     stdin_text: str | None = None
     declared_effect: str | None = None
+    #: Opaque #383 `trusted_host` lease token. Never itself an authorization to widen
+    #: anything beyond what the resolved lease's own scope already grants -- see
+    #: _resolve_lease_for_command.
+    lease_token: str | None = None
     cancellation_token: CancellationToken | None = None
 
 
@@ -180,6 +185,7 @@ class WorkspaceRunAdhocSequenceCommand:
     expected_head_sha: str | None = None
     mutability: str = "read_only"
     declared_effect: str | None = None
+    lease_token: str | None = None
     cancellation_token: CancellationToken | None = None
 
 
@@ -337,6 +343,36 @@ def _assert_push_destination_not_protected(argv: tuple[str, ...], repo: Reposito
             )
 
 
+def _resolve_lease_for_command(
+    ctx: ApplicationContext,
+    *,
+    lease_token: str | None,
+    repo: RepositoryConfig,
+    branch: str,
+) -> HostBypassLease | None:
+    """Resolve the active #383 `trusted_host` lease ``lease_token`` authenticates for
+    this exact repository and branch, or ``None`` if it cannot be presented, is absent,
+    or does not resolve.
+
+    Deliberately silent about *why* it returns ``None`` (no lease store wired, feature
+    disabled for this repository, or a token that is expired/revoked/scope-mismatched):
+    ordinary admission takes over identically in every case, so there is no way for a
+    caller to distinguish "the lease feature isn't configured" from "my token is
+    invalid" and use that as an oracle. A live re-check of ``trusted_host_enabled``
+    (not just the lease's own stored config-generation stamp) means an operator
+    disabling the capability takes effect on the next call, not just on future grants.
+    """
+    if lease_token is None or ctx.host_bypass_leases is None or not repo.trusted_host_enabled:
+        return None
+    leases = (envelope.value for envelope in ctx.host_bypass_leases.list_records().records)
+    return resolve_active_lease(
+        leases,
+        raw_token=lease_token,
+        repository_identity=repo.repo_id,
+        branch_or_ref=branch,
+    )
+
+
 def _gh_credential_scrub_env(workspace_root: Path) -> tuple[tuple[str, str], ...]:
     """Point ``gh``'s config/credential lookup at an empty, never-created scratch directory
     instead of the ambient ``$HOME/.config/gh`` (#407).
@@ -449,8 +485,11 @@ class WorkspaceAdhocRunner:
         *,
         progress: Callable[[str, int, int, str, str], None] | None = None,
     ) -> WorkspaceRunAdhocResult | WorkspaceRunAdhocBackgroundResult:
-        _, repo, path = self.ctx.workspace(c.workspace_id)
-        if repo.execution_mode is not ExecutionMode.RELAXED:
+        record, repo, path = self.ctx.workspace(c.workspace_id)
+        lease = _resolve_lease_for_command(
+            self.ctx, lease_token=c.lease_token, repo=repo, branch=record.branch
+        )
+        if lease is None and repo.execution_mode is not ExecutionMode.RELAXED:
             raise _strict_mode_error(repo.repo_id)
         if c.mutability not in {"read_only", "workspace"}:
             raise _adhoc_error(
@@ -466,7 +505,9 @@ class WorkspaceAdhocRunner:
             # script body as a whole is opaque to it exactly like every non-git argv
             # runner already is -- not a new gap. scan_script_for_blocked_git_forms
             # (#407) is a best-effort, additive scan for a git-shaped invocation embedded
-            # in the script text; it is not authoritative (see its own docstring).
+            # in the script text; it is not authoritative (see its own docstring). A
+            # #383 lease does not bypass adhoc_shell_runners -- it widens the argv
+            # form's runner allowlist only.
             scan_script_for_blocked_git_forms(script)
             for segment in extract_git_argv_segments(script):
                 _assert_push_destination_not_protected(segment, repo)
@@ -477,10 +518,14 @@ class WorkspaceAdhocRunner:
                     "Ad-hoc command requires either argv or script",
                     ErrorCode.ADHOC_ARGV_INVALID,
                 )
-            argv = validate_adhoc_argv(c.argv, repo.effective_adhoc_runners())
+            argv = validate_adhoc_argv(
+                c.argv, repo.effective_adhoc_runners(), bypass_runner_allowlist=lease is not None
+            )
             # Content-inspect the exact argv: blocks irreversible/history-rewriting git
             # forms (raising ADHOC_COMMAND_FORBIDDEN before any process starts) and infers
             # the git command's effect (#382). Non-git runners return None (opaque).
+            # Applies unconditionally, lease or not -- #385's circuit breakers and #407's
+            # protected-ref check are never what a trusted_host lease widens.
             effect_class = classify_adhoc_effect(argv)
             _assert_push_destination_not_protected(argv, repo)
         command_class = None if effect_class is None else effect_to_command_class(effect_class)
@@ -531,6 +576,10 @@ class WorkspaceAdhocRunner:
             # Length only. Standard input is caller-supplied content that may carry a
             # patch, a token, or anything else, and the audit log is not the place for it.
             "stdin_length": len(stdin_text) if stdin_text is not None else 0,
+            # Never the raw token (#383 AC4: durable evidence must not expose bearer
+            # secrets) -- only whether a lease resolved and which one, so a revoked or
+            # expired lease's earlier uses remain traceable.
+            "trusted_host_lease_id": lease.lease_id if lease is not None else None,
         }
 
         def record_command_failure(exc: CommandError) -> None:
@@ -764,15 +813,22 @@ class WorkspaceAdhocRunner:
         in order under one held workspace lock, stopping at the first non-zero exit.
         Fingerprint/HEAD preconditions and verification-invalidation bracket the whole
         sequence, exactly like a single ad-hoc run's own bracketing -- not per element."""
-        _, repo, path = self.ctx.workspace(c.workspace_id)
-        if repo.execution_mode is not ExecutionMode.RELAXED:
+        record, repo, path = self.ctx.workspace(c.workspace_id)
+        lease = _resolve_lease_for_command(
+            self.ctx, lease_token=c.lease_token, repo=repo, branch=record.branch
+        )
+        if lease is None and repo.execution_mode is not ExecutionMode.RELAXED:
             raise _strict_mode_error(repo.repo_id)
         if c.mutability not in {"read_only", "workspace"}:
             raise _adhoc_error(
                 f"Ad-hoc mutability must be 'read_only' or 'workspace'; got {c.mutability!r}",
                 ErrorCode.ADHOC_ARGV_INVALID,
             )
-        validated = validate_adhoc_sequence(c.argv_sequence, repo.effective_adhoc_runners())
+        validated = validate_adhoc_sequence(
+            c.argv_sequence,
+            repo.effective_adhoc_runners(),
+            bypass_runner_allowlist=lease is not None,
+        )
         effect_classes = [classify_adhoc_effect(argv) for argv in validated]
         for argv in validated:
             _assert_push_destination_not_protected(argv, repo)
@@ -821,6 +877,7 @@ class WorkspaceAdhocRunner:
             "mutability": c.mutability,
             "declared_effect": declared_effect.value,
             "effect_mismatch": sequence_effect_mismatch,
+            "trusted_host_lease_id": lease.lease_id if lease is not None else None,
         }
 
         def run_body() -> WorkspaceRunAdhocSequenceResult:

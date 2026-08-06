@@ -1690,6 +1690,7 @@ class CodingService:
         mutability: str = "read_only",
         declared_effect: str | None = None,
         background: bool = False,
+        lease_token: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._exec.execute(
@@ -1706,6 +1707,7 @@ class CodingService:
                     mutability=mutability,
                     declared_effect=declared_effect,
                     background=background,
+                    lease_token=lease_token,
                 )
             )
         )

@@ -610,6 +610,7 @@ _WORK_REQUEST_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
             "mutability",
             "stdin_text",
             "declared_effect",
+            "lease_token",
         }
     ),
     "diagnostic": frozenset(
@@ -659,6 +660,7 @@ def _operation_work_item(kind: str) -> Callable[[Path], tuple[object, object]]:
                 "mutability": "workspace_write",
                 "stdin_text": "--- a/x\n+++ b/x\n",
                 "declared_effect": "local_history",
+                "lease_token": "fixture-raw-token",
             },
             "diagnostic": {
                 "diagnostic_id": "diag-1",
@@ -695,6 +697,36 @@ def _operation_work_item(kind: str) -> Callable[[Path], tuple[object, object]]:
         return written, store.read(written.operation_id)
 
     return round_trip
+
+
+def _host_bypass_lease(tmp_path: Path) -> tuple[object, object]:
+    from datetime import datetime, timedelta, timezone
+
+    from repoforge.adapters.persistence.json_lease_store import JsonHostBypassLeaseStore
+    from repoforge.domain.host_bypass_lease import HostBypassLease, hash_lease_token
+
+    store = JsonHostBypassLeaseStore(tmp_path, InMemoryLockManager())
+    issued_at = datetime(2026, 7, 29, 9, 26, 21, tzinfo=timezone.utc)
+    written = HostBypassLease(
+        lease_id="lease-" + "6" * 24,
+        repository_identity="repoforge",
+        checkout_identity="repoforge",
+        workspace_kind="managed_worktree",
+        branch_or_ref="ai/epic-369-shell-autonomy",
+        allowed_effects=("broad_shell",),
+        host_effect_scope=("network_egress",),
+        execution_environment_id="env-native",
+        credential_profile_ids=("npm",),
+        granted_by="local-operator",
+        principal_token_hash=hash_lease_token("fixture-raw-token"),
+        config_generation="15",
+        policy_digest=_SHA,
+        issued_at=issued_at,
+        expires_at=issued_at + timedelta(minutes=30),
+        revoked_at=issued_at + timedelta(minutes=10),
+    )
+    store.create(written)
+    return written, _value(store.read(written.lease_id))
 
 
 def _approval_request(tmp_path: Path) -> tuple[object, object]:
@@ -1121,6 +1153,7 @@ def _register() -> tuple[RoundTripCase, ...]:
         ExecutionWorkerBinding,
     )
     from repoforge.domain.failure_intelligence import FailureEvidence
+    from repoforge.domain.host_bypass_lease import HostBypassLease
     from repoforge.domain.issue_graph_proposal import IssueGraphProposal
     from repoforge.domain.issue_graph_publication import (
         IssueGraphPublication,
@@ -1153,6 +1186,7 @@ def _register() -> tuple[RoundTripCase, ...]:
         RoundTripCase(ExecutionPlanAcceptance, _execution_plan_acceptance),
         RoundTripCase(IterationCacheEntry, _iteration_cache_entry),
         RoundTripCase(ApprovalRequest, _approval_request),
+        RoundTripCase(HostBypassLease, _host_bypass_lease),
         RoundTripCase(
             FailureEvidence,
             _failure_evidence,

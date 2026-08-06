@@ -89,7 +89,7 @@
       "tool_surface_hash": "a35cf906a086c19e7235b638266e65f7a45c94626984d12816b6a6215f9258b7"
     },
     "identity": "forge_v2",
-    "input_contract_digest": "dd6880d005986520ef211ffd4991d878587e3478f1f8a5f34c6a4f2f8d1f6204",
+    "input_contract_digest": "8b6c14665efa2fe36fadf6daedfa4ab7750dc429841a9f77477f4f205608e702",
     "output_contract_digest": "2999db4db51f863a12d9d00811a2a8b7fa0a2b7131c06b5dce6befe9f6fed01a",
     "retired_identity": "forge_v1",
     "server_instructions_sha256": "8c74bb77fd9cd7d5d204a1d6b15fa658d922637ffa48dcdf95db9c44ddecafd2",
@@ -117,7 +117,7 @@
       "workspace_commit": "62ed14022eb4749a09468777119b8891a62da9acee364eba9acd02dadf0dc914",
       "workspace_create": "a3b850892845a90ccf37105e2f1a182ff5b1a22c6caf136ceea674f6dc68ae1a",
       "workspace_diff": "104310b555245bee5566b6b12f75e1de0369f0779cf4225e0401426990ee9420",
-      "workspace_exec": "a62a4239cb852e170f399cfbdc18ebfeb5b5811450f7b5287e43755c0c149813",
+      "workspace_exec": "bd6e613c1aed2a56238121decc69078fd8bcae38c07ae7a4b1ceef7e9fd5f4cc",
       "workspace_format_changed": "ce7f33f2fad49ce45fd47a9d7d3e270d3cab8716ee32aec6d278ec7359ff1765",
       "workspace_list": "a13be9cc89b0ef25f76bb5cc125cd59b8da72fee5390d34839222a538b927cab",
       "workspace_mutate": "301f215724cffe04a10ca41d9499e913cc61691b856162409e985ae817793afb",
@@ -163,8 +163,8 @@
       "config_inspect",
       "runtime_logs_read"
     ],
-    "tool_schema_bundle_sha256": "ff8ff8926b1b6d567594b876612f110406b4ed81e5d98a623ad3e7b1d66c4bc1",
-    "tool_surface_hash": "f4dd52a7669eb7d577ead8ac316ffade4a2061f06a87da006a845d18cb2ff690"
+    "tool_schema_bundle_sha256": "17d3ad8ba0bceb1b430847d8d86f75d94a7cb560c92903cdf6244195b70ddea9",
+    "tool_surface_hash": "678436804bed0168fc2e16d4e7b3654abf1ad30b24ae4e05b2ce6198cefefe48"
   },
   "package_version": "2.2.0",
   "runtime": {

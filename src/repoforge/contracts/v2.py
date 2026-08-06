@@ -1797,10 +1797,12 @@ class WorkspaceExecInput(StrictModel):
         description=(
             "A reviewed multiline shell-script body (#377), run through the interpreter "
             "named in `shell`. Bounded like stdin_text, not like an argv element -- "
-            "newlines are the whole point. Unlike argv, script content is never "
-            "inspected for git forms: classify_adhoc_command only content-inspects "
-            "when argv[0] == 'git' literally, so this does not remove a safety "
-            "guarantee the argv form had either. Requires the repository to configure "
+            "newlines are the whole point. Unlike argv, script content is not "
+            "authoritatively inspected for git forms (classify_adhoc_command only "
+            "content-inspects when argv[0] == 'git' literally); a best-effort scan "
+            "(#407) additionally catches a blocked git form copy-pasted directly into "
+            "the script body, though it is not a shell parser. Requires the repository "
+            "to configure "
             "a non-empty adhoc_shell_runners allowlist. Mutually exclusive with argv "
             "and argv_sequence."
         ),
@@ -1842,6 +1844,20 @@ class WorkspaceExecInput(StrictModel):
             "check consults it, so declaring a broader effect than a command turns out to "
             "need cannot self-upgrade what actually runs. Compared against the "
             "independently observed effect to produce effect_mismatch evidence."
+        ),
+    )
+    lease_token: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "An opaque `trusted_host` lease token minted by `rf trust grant` (#383). "
+            "Presenting a token can only ever widen the runner allowlist for this exact "
+            "repository and branch to whatever the operator's own grant already "
+            "scoped -- it never mints or widens a lease, and every non-bypassable "
+            "circuit breaker (#385) and the credential-scrub/protected-ref checks "
+            "(#407) still apply regardless. An absent, expired, revoked, or "
+            "scope-mismatched token is silently equivalent to omitting it: ordinary "
+            "admission still applies, never a partial or degraded bypass."
         ),
     )
 

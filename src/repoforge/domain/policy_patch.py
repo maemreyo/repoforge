@@ -21,6 +21,7 @@ from .adhoc import validate_adhoc_runners
 from .credential_profiles import validate_credential_profiles
 from .errors import ConfigError
 from .execution_profiles import validate_execution_profiles
+from .host_bypass_lease import MAX_LEASE_TTL_SECONDS
 from .verification_steps import (
     HygieneBaselinePolicy,
     VerificationStep,
@@ -399,6 +400,8 @@ class RepositoryPolicyPatch:
     adhoc_timeout_seconds: int | None = None
     execution_profiles: tuple[str, ...] | None = None
     credential_profiles: tuple[str, ...] | None = None
+    trusted_host_enabled: bool | None = None
+    trusted_host_max_lease_ttl_seconds: int | None = None
     remove_profiles: tuple[str, ...] = ()
     remove_diagnostics: tuple[str, ...] = ()
     remove_formatters: tuple[str, ...] = ()
@@ -445,6 +448,19 @@ class RepositoryPolicyPatch:
         ):
             raise PolicyPatchError(
                 f"adhoc_timeout_seconds must be an integer in 1..{MAX_ADHOC_TIMEOUT_SECONDS}"
+            )
+        if self.trusted_host_enabled is not None and not isinstance(
+            self.trusted_host_enabled, bool
+        ):
+            raise PolicyPatchError("trusted_host_enabled must be true or false")
+        if self.trusted_host_max_lease_ttl_seconds is not None and (
+            not isinstance(self.trusted_host_max_lease_ttl_seconds, int)
+            or isinstance(self.trusted_host_max_lease_ttl_seconds, bool)
+            or not 60 <= self.trusted_host_max_lease_ttl_seconds <= MAX_LEASE_TTL_SECONDS
+        ):
+            raise PolicyPatchError(
+                "trusted_host_max_lease_ttl_seconds must be an integer in "
+                f"60..{MAX_LEASE_TTL_SECONDS}"
             )
         for label, entries in (
             ("profiles", self.profiles),
@@ -510,6 +526,8 @@ class RepositoryPolicyPatch:
             or self.adhoc_timeout_seconds is not None
             or self.execution_profiles is not None
             or self.credential_profiles is not None
+            or self.trusted_host_enabled is not None
+            or self.trusted_host_max_lease_ttl_seconds is not None
             or self.remove_profiles
             or self.remove_diagnostics
             or self.remove_formatters
@@ -570,6 +588,16 @@ class RepositoryPolicyPatch:
                 if other.credential_profiles is not None
                 else self.credential_profiles
             ),
+            trusted_host_enabled=(
+                other.trusted_host_enabled
+                if other.trusted_host_enabled is not None
+                else self.trusted_host_enabled
+            ),
+            trusted_host_max_lease_ttl_seconds=(
+                other.trusted_host_max_lease_ttl_seconds
+                if other.trusted_host_max_lease_ttl_seconds is not None
+                else self.trusted_host_max_lease_ttl_seconds
+            ),
             remove_profiles=tuple(remove_profiles),
             remove_diagnostics=tuple(remove_diagnostics),
             remove_formatters=tuple(remove_formatters),
@@ -589,6 +617,10 @@ class RepositoryPolicyPatch:
             table["execution_profiles"] = list(self.execution_profiles)
         if self.credential_profiles is not None:
             table["credential_profiles"] = list(self.credential_profiles)
+        if self.trusted_host_enabled is not None:
+            table["trusted_host_enabled"] = self.trusted_host_enabled
+        if self.trusted_host_max_lease_ttl_seconds is not None:
+            table["trusted_host_max_lease_ttl_seconds"] = self.trusted_host_max_lease_ttl_seconds
         if self.remove_profiles:
             table["remove_profiles"] = list(self.remove_profiles)
         if self.remove_diagnostics:
@@ -621,6 +653,8 @@ class RepositoryPolicyPatch:
                 "adhoc_timeout_seconds",
                 "execution_profiles",
                 "credential_profiles",
+                "trusted_host_enabled",
+                "trusted_host_max_lease_ttl_seconds",
                 "remove_profiles",
                 "remove_diagnostics",
                 "remove_formatters",
@@ -666,6 +700,8 @@ class RepositoryPolicyPatch:
                 if isinstance(raw.get("credential_profiles"), (list, tuple))
                 else None
             ),
+            trusted_host_enabled=raw.get("trusted_host_enabled"),
+            trusted_host_max_lease_ttl_seconds=raw.get("trusted_host_max_lease_ttl_seconds"),
             remove_profiles=tuple(raw.get("remove_profiles", ())),
             remove_diagnostics=tuple(raw.get("remove_diagnostics", ())),
             remove_formatters=tuple(raw.get("remove_formatters", ())),

@@ -21,14 +21,18 @@ uses for its own `_verify_adhoc` calls).
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from conftest import ForgeEnvironment, create_forge_environment, durable_worker
 
+from repoforge.adapters.persistence.json_lease_store import JsonHostBypassLeaseStore
+from repoforge.bootstrap import build_lock_manager
 from repoforge.contracts.v2 import WorkspaceExecInput
 from repoforge.domain.adhoc import MAX_ADHOC_STDIN_LENGTH
 from repoforge.domain.errors import ErrorCode, RepoForgeError
+from repoforge.domain.host_bypass_lease import HostBypassLease, mint_lease_token
 
 
 def _relaxed_env(
@@ -827,3 +831,146 @@ def test_argv_sequence_reports_execution_evidence(tmp_path: Path) -> None:
     assert result["execution_evidence"]
     assert result["execution_evidence"]["requested_filesystem"] == "workspace_write"
     assert result["execution_evidence"]["effective_filesystem"] == "host_account_access"
+
+
+# ---------------------------------------------------------------------------
+# #383: operator-issued trusted_host lease widens the runner allowlist only for
+# an exact repository+branch match, presented via an opaque token -- never a
+# model-mintable authorization.
+# ---------------------------------------------------------------------------
+
+
+def _grant_lease(
+    env: ForgeEnvironment,
+    *,
+    repo_id: str,
+    branch: str,
+    ttl_seconds: int = 1_800,
+    issued_at: datetime | None = None,
+) -> str:
+    """Directly mint and persist a lease (bypassing the CLI), returning the raw token."""
+    lease_store = JsonHostBypassLeaseStore(
+        env.root / "state", build_lock_manager(env.root / "state")
+    )
+    raw_token, token_hash = mint_lease_token()
+    now = issued_at if issued_at is not None else datetime.now(timezone.utc)
+    lease_store.create(
+        HostBypassLease(
+            lease_id="lease-" + "a" * 24,
+            repository_identity=repo_id,
+            checkout_identity=repo_id,
+            workspace_kind="managed_worktree",
+            branch_or_ref=branch,
+            allowed_effects=("broad_shell",),
+            host_effect_scope=(),
+            credential_profile_ids=(),
+            granted_by="test-operator",
+            principal_token_hash=token_hash,
+            config_generation="1",
+            policy_digest="digest",
+            issued_at=now,
+            expires_at=now + timedelta(seconds=ttl_seconds),
+        )
+    )
+    return raw_token
+
+
+def _relaxed_env_with_trust(tmp_path: Path, *, runners: tuple[str, ...] = ()) -> ForgeEnvironment:
+    return create_forge_environment(
+        tmp_path,
+        execution_mode="strict",
+        adhoc_runners=runners,
+        trusted_host_enabled=True,
+    )
+
+
+def test_lease_widens_runner_allowlist_beyond_strict_mode(tmp_path: Path) -> None:
+    """#383 AC1: an active lease lets a normally-disabled (strict) repository run an
+    arbitrary command for the lease's exact branch, without the operator making the
+    repository relaxed or listing the runner in adhoc_runners at all."""
+    env = _relaxed_env_with_trust(tmp_path)
+    created = env.service.workspace_create("demo", "trusted host lease widens allowlist")
+    workspace_id = created["workspace_id"]
+    token = _grant_lease(env, repo_id="demo", branch=created["branch"])
+
+    result = _exec(env, workspace_id, ("python3", "--version"), lease_token=token)
+
+    assert result["outcome"] == "passed"
+    assert result["commands"][0]["returncode"] == 0
+
+
+def test_lease_never_widens_circuit_breakers(tmp_path: Path) -> None:
+    """#383: a lease widens the runner allowlist only -- #385's circuit breakers and
+    #407's protected-ref check still apply unconditionally."""
+    env = _relaxed_env_with_trust(tmp_path, runners=("git",))
+    created = env.service.workspace_create("demo", "trusted host lease still blocked")
+    workspace_id = created["workspace_id"]
+    token = _grant_lease(env, repo_id="demo", branch=created["branch"])
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec(
+            env,
+            workspace_id,
+            ("git", "push", "--force", "origin", "main"),
+            lease_token=token,
+        )
+    assert exc.value.code is ErrorCode.DESTRUCTIVE_REMOTE_OPERATION_BLOCKED
+
+
+def test_lease_scoped_to_a_different_branch_does_not_apply(tmp_path: Path) -> None:
+    """#383 AC3: a lease cannot be replayed against a broader scope than granted --
+    here, a different branch than the one it names."""
+    env = _relaxed_env_with_trust(tmp_path)
+    created = env.service.workspace_create("demo", "trusted host lease wrong branch")
+    workspace_id = created["workspace_id"]
+    token = _grant_lease(env, repo_id="demo", branch="ai/some-other-branch")
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec(env, workspace_id, ("python3", "--version"), lease_token=token)
+    assert exc.value.code is ErrorCode.EXECUTION_MODE_STRICT
+
+
+def test_expired_lease_does_not_apply(tmp_path: Path) -> None:
+    """#383 AC2: an expired lease fails before process launch -- ordinary admission
+    applies as if no token had been presented at all."""
+    env = _relaxed_env_with_trust(tmp_path)
+    created = env.service.workspace_create("demo", "trusted host lease expired")
+    workspace_id = created["workspace_id"]
+    token = _grant_lease(
+        env,
+        repo_id="demo",
+        branch=created["branch"],
+        ttl_seconds=60,
+        issued_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec(env, workspace_id, ("python3", "--version"), lease_token=token)
+    assert exc.value.code is ErrorCode.EXECUTION_MODE_STRICT
+
+
+def test_wrong_token_does_not_apply(tmp_path: Path) -> None:
+    """A token that does not hash-match any stored lease is indistinguishable from no
+    token at all -- never a partial or degraded bypass."""
+    env = _relaxed_env_with_trust(tmp_path)
+    created = env.service.workspace_create("demo", "trusted host lease wrong token")
+    workspace_id = created["workspace_id"]
+    _grant_lease(env, repo_id="demo", branch=created["branch"])
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec(env, workspace_id, ("python3", "--version"), lease_token="not-the-real-token")
+    assert exc.value.code is ErrorCode.EXECUTION_MODE_STRICT
+
+
+def test_lease_ignored_when_repository_not_enrolled(tmp_path: Path) -> None:
+    """#383: trusted_host_enabled=False (the default) means a presented token is
+    inert, even if a lease record happens to exist for this repository/branch --
+    ordinary relaxed-mode admission (here, its runner allowlist) still applies."""
+    env = _relaxed_env(tmp_path)  # trusted_host_enabled defaults to False
+    created = env.service.workspace_create("demo", "trusted host lease not enrolled")
+    workspace_id = created["workspace_id"]
+    token = _grant_lease(env, repo_id="demo", branch=created["branch"])
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec(env, workspace_id, ("node", "--version"), lease_token=token)
+    assert exc.value.code is ErrorCode.ADHOC_RUNNER_NOT_ALLOWED

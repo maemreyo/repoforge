@@ -91,6 +91,7 @@ from .adapters.persistence import (
     JsonExternalMutationLedger,
     JsonFailureEvidenceStore,
     JsonGitHubReadCache,
+    JsonHostBypassLeaseStore,
     JsonHygieneBaselineCache,
     JsonIdempotencyStore,
     JsonIssueGraphProposalStore,
@@ -394,6 +395,7 @@ class AdapterOverrides:
     issue_graph_proposals: IssueGraphProposalStore | None = None
     issue_graph_publications: IssueGraphPublicationStore | None = None
     publications: WorkspacePublicationService | None = None
+    host_bypass_leases: JsonHostBypassLeaseStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1648,6 +1650,9 @@ def build_application(
         locks,
     )
     approvals = o.approvals or JsonApprovalStore(config.server.state_root, locks)
+    host_bypass_leases = o.host_bypass_leases or JsonHostBypassLeaseStore(
+        config.server.state_root, locks
+    )
     approval_payloads = o.approval_payloads or JsonApprovalPayloadStore(
         config.server.state_root,
         locks,
@@ -1904,6 +1909,7 @@ def build_application(
         reaper=reaper,
         publications=o.publications,
         config_generation=config_generation,
+        host_bypass_leases=host_bypass_leases,
     )
     if context.publications is None:
         publication_gateway = PublicationAdapter(

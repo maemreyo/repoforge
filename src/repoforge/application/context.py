@@ -39,6 +39,7 @@ from ..ports import (
     GitHubReadCache,
     GitRepository,
     GitTransportGateway,
+    HostBypassLeaseStore,
     HygieneBaselineCache,
     HygieneGateway,
     IdempotencyStore,
@@ -324,6 +325,10 @@ class ApplicationContext:
         Callable[[RepositoryConfig], GitHubObservationAuthority | None] | None
     ) = None
     config_generation: int = 0
+    #: Durable store for #383's operator-issued `trusted_host` leases. Absent means the
+    #: runtime has no lease-consumption path wired at all -- a `lease_token` presented to
+    #: workspace_exec/workspace_run_adhoc is then simply ignored, not silently trusted.
+    host_bypass_leases: HostBypassLeaseStore | None = None
 
     def now_epoch(self) -> float:
         try:

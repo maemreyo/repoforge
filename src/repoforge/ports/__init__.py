@@ -82,6 +82,7 @@ from .github_api_token import (
 from .github_capabilities import GitHubCapabilityProbe
 from .github_capability_preflight import GitHubCapabilityPreflightGateway
 from .github_read_cache import GitHubReadCache
+from .host_bypass_lease_store import HostBypassLeaseStore
 from .hygiene import (
     HygieneBaselineCache,
     HygieneCacheKey,
@@ -216,6 +217,7 @@ __all__ = [
     "GitSnapshotBlob",
     "GitTransportGateway",
     "HealthSample",
+    "HostBypassLeaseStore",
     "HygieneBaselineCache",
     "HygieneCacheKey",
     "HygieneFormatReceipt",

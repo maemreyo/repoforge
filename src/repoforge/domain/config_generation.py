@@ -652,6 +652,8 @@ _REPO_RECOGNIZED = {
     "adhoc_timeout_seconds",
     "execution_profiles",
     "credential_profiles",
+    "trusted_host_enabled",
+    "trusted_host_max_lease_ttl_seconds",
     "trusted_external_checkouts",
 }
 _SERVER_RECOGNIZED = {
@@ -1030,6 +1032,29 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             left.get("adhoc_timeout_seconds", 300),
             right.get("adhoc_timeout_seconds", 300),
             reason="ad-hoc process duration",
+        )
+        left_trusted_host = bool(left.get("trusted_host_enabled", False))
+        right_trusted_host = bool(right.get("trusted_host_enabled", False))
+        if left_trusted_host != right_trusted_host:
+            changes.append(
+                CapabilityChange(
+                    prefix + ".trusted_host_enabled",
+                    left_trusted_host,
+                    right_trusted_host,
+                    (
+                        CapabilityDeltaKind.EXPANSION
+                        if right_trusted_host
+                        else CapabilityDeltaKind.RESTRICTION
+                    ),
+                    "trusted_host lease eligibility changed",
+                )
+            )
+        _record_number(
+            changes,
+            prefix + ".trusted_host_max_lease_ttl_seconds",
+            left.get("trusted_host_max_lease_ttl_seconds", 14_400),
+            right.get("trusted_host_max_lease_ttl_seconds", 14_400),
+            reason="trusted_host lease TTL ceiling",
         )
         left_checkouts = left.get("trusted_external_checkouts")
         right_checkouts = right.get("trusted_external_checkouts")

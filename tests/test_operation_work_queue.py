@@ -395,6 +395,7 @@ def test_adhoc_work_request_round_trips_exact_argv_and_policy() -> None:
         "mutability": "read_only",
         "stdin_text": None,
         "declared_effect": None,
+        "lease_token": None,
         "expected_head_sha": "b" * 40,
         "expected_fingerprint": "c" * 64,
         "config_generation": 12,
