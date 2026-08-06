@@ -13,10 +13,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field, replace
 
-from ...domain.errors import ErrorCode, RepoForgeError, WorkspaceError
+from ...domain.errors import ErrorCode, WorkspaceError
 from ...domain.operation_task import OperationTask
 from ...domain.operation_work import OperationWorkRequest
 from ..context import ApplicationContext
+from ..dto import to_data
 from ..operations import durable_wait
 from ..operations.manager import OperationManager
 from ..operations.work_admission import DurableWorkAdmission
@@ -86,6 +87,11 @@ class WorkspaceExecCommand:
     lease_token: str | None = None
     #: Request the #384 `sandboxed_turbo` execution backend for this call.
     sandbox_requested: bool = False
+    #: #379 AC4: a connector that lost the response to a call can retry with the same
+    #: key and get the original outcome replayed (never a second run of the command) --
+    #: including a still-`outcome="running"` handle, whose operation_id the client then
+    #: polls exactly as it would have from the original call.
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +135,24 @@ class WorkspaceExecutor:
             "mutability": command.mutability,
             "background": command.background,
         }
+        if command.idempotency_key is not None:
+            # #379 AC4: mirrors application/publication.py's own use of ctx.idempotent()
+            # for push/PR-create -- the idempotency claim (operations.create/start +
+            # effect receipt) is itself the durable evidence trail for this call, so it
+            # is deliberately NOT also wrapped in ctx.audited() here (matching every
+            # other keyed action in this codebase; "workspace_exec" is not registered in
+            # _MUTATING_ACTIONS precisely because its own explicit mutating=True below
+            # covers the unkeyed case instead of a blanket action-name registration).
+            replayed: WorkspaceExecResult = self.ctx.idempotent(
+                "workspace_exec",
+                command.idempotency_key,
+                to_data(command),
+                lambda: self._execute(command),
+                details=audit_details,
+                serialize=to_data,
+                deserialize=lambda value: WorkspaceExecResult(**value),
+            )
+            return replayed
         return self.ctx.audited(
             "workspace_exec",
             audit_details,
@@ -260,10 +284,17 @@ class WorkspaceExecutor:
                     run_inline=True,
                 )
             )
-            if not isinstance(single_result, WorkspaceRunAdhocResult):
-                raise RepoForgeError(
-                    "Inline ad-hoc execution returned a background operation",
-                    code=ErrorCode.INTERNAL_ERROR,
+            if isinstance(single_result, WorkspaceRunAdhocBackgroundResult):
+                # #379 AC1: the ceiling elapsed and the still-running process was
+                # promoted to a durably-tracked background operation, never killed or
+                # restarted. framework_overhead_ms has no meaning for a run that has not
+                # finished -- there is no completed duration to subtract from -- so it
+                # is left unset here exactly like the ordinary background=true path.
+                return self._project(
+                    command,
+                    single_result,
+                    head_sha=head_sha,
+                    workspace_fingerprint=workspace_fingerprint,
                 )
             delegated = single_result
             delegated_duration_ms = single_result.duration_ms

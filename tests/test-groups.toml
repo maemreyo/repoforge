@@ -399,6 +399,7 @@ test_files = [
   "tests/test_workspace_adhoc.py",
   "tests/test_workspace_exec.py",
   "tests/test_workspace_exec_inline.py",
+  "tests/test_workspace_exec_promotion.py",
   "tests/test_workspace_risk.py",
 ]
 
@@ -777,6 +778,7 @@ test_files = [
   "tests/test_workspace_adopt_branch.py",
   "tests/test_workspace_exec.py",
   "tests/test_workspace_exec_inline.py",
+  "tests/test_workspace_exec_promotion.py",
   "tests/test_workspace_assessment.py",
   "tests/test_workspace_attach.py",
   "tests/test_workspace_diagnostics.py",

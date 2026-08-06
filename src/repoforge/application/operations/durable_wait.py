@@ -29,9 +29,20 @@ def wait_for_operation(
     ctx: ApplicationContext, operations: OperationManager, operation_id: str
 ) -> tuple[OperationTask, dict[str, Any] | None]:
     deadline = time.monotonic() + FOREGROUND_WAIT_SECONDS
+    # Registering before the first status read (rather than only on timeout) means a
+    # completion that races ahead of this call still leaves the Event pre-set (#379 AC3):
+    # OperationCompletionSignals.fire() creates-and-sets the same key register() would
+    # create, so there is no window where a fast finish is missed.
+    event = ctx.operation_completion_signals.register(operation_id)
     task = operations.status(operation_id)
     while task.state not in TERMINAL_OPERATION_STATES and time.monotonic() < deadline:
-        time.sleep(FOREGROUND_POLL_SECONDS)
+        remaining = deadline - time.monotonic()
+        # Same worst-case cadence as the fixed poll it replaces (bounded by
+        # FOREGROUND_POLL_SECONDS either way) -- this only lets a same-process
+        # completion wake the wait immediately instead of on the next tick. A
+        # cross-process operation this signal never fires for still gets caught within
+        # one FOREGROUND_POLL_SECONDS tick, exactly as before.
+        event.wait(timeout=min(FOREGROUND_POLL_SECONDS, max(remaining, 0.0)))
         task = operations.status(operation_id)
     result = None
     if task.state is OperationState.SUCCEEDED and ctx.operation_result_store is not None:

@@ -1692,6 +1692,7 @@ class CodingService:
         background: bool = False,
         lease_token: str | None = None,
         sandbox_requested: bool = False,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._exec.execute(
@@ -1710,6 +1711,7 @@ class CodingService:
                     background=background,
                     lease_token=lease_token,
                     sandbox_requested=sandbox_requested,
+                    idempotency_key=idempotency_key,
                 )
             )
         )

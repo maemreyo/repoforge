@@ -1873,6 +1873,19 @@ class WorkspaceExecInput(StrictModel):
             "enrolled, never a partial or degraded bypass."
         ),
     )
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=256,
+        description=(
+            "#379: a connector that lost the response to a call can retry with the same "
+            "key and the same command to get the original outcome replayed instead of "
+            "running the command again -- including a still-running outcome, whose "
+            "operation_id the retry then polls exactly as the original call would have. "
+            "Retrying with the same key but different arguments is rejected as a "
+            "conflict; a new key always runs as a fresh call."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_command_form(self) -> WorkspaceExecInput:

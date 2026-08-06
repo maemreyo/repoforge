@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from ...config import RepositoryConfig
 from ...domain.adhoc import (
@@ -51,6 +52,7 @@ from ...domain.policy import normalize_relative_path
 from ...ports.background_tasks import BackgroundTaskRunner
 from ...ports.cancellation import CancellationToken
 from ...ports.command import CommandResult
+from ...ports.operation_result_store import OperationResultStore
 from ..context import ApplicationContext
 from ..dto import to_data
 from ..execution.requests import adhoc_execution_request
@@ -644,14 +646,12 @@ class WorkspaceAdhocRunner:
                 # budget that number came from -- and that it is an operator-adjustable
                 # field rather than a platform limit -- is known here, and withholding it
                 # is what makes an agent invent a chunked workaround for a job that simply
-                # needed a bigger budget or a profile of its own.
-                if c.run_inline:
-                    exc.safe_next_action = _adhoc_timeout_remedy(
-                        min(repo.adhoc_timeout_seconds, repo.adhoc_inline_max_seconds),
-                        inline=True,
-                    )
-                else:
-                    exc.safe_next_action = _adhoc_timeout_remedy(repo.adhoc_timeout_seconds)
+                # needed a bigger budget or a profile of its own. #379 promotes a
+                # run_inline call that outlives adhoc_inline_max_seconds instead of
+                # killing it (see _execute_inline_or_promote), so by the time a timeout
+                # can actually fire here the run is already durably tracked under the
+                # full adhoc_timeout_seconds budget -- the same remedy as any other run.
+                exc.safe_next_action = _adhoc_timeout_remedy(repo.adhoc_timeout_seconds)
             if exc.code is ErrorCode.NOT_FOUND and not exc.safe_next_action:
                 executable = exc.details.get("executable")
                 if isinstance(executable, str):
@@ -707,18 +707,19 @@ class WorkspaceAdhocRunner:
                 result: CommandResult | None = None
                 command_error: CommandError | None = None
                 execution_evidence_data: dict[str, object] = {}
-                effective_timeout = (
-                    min(locked_repo.adhoc_timeout_seconds, locked_repo.adhoc_inline_max_seconds)
-                    if c.run_inline
-                    else locked_repo.adhoc_timeout_seconds
-                )
+                # #379: run_inline no longer shrinks the subprocess's own kill-timeout --
+                # adhoc_inline_max_seconds now only bounds how long
+                # _execute_inline_or_promote() waits synchronously before promoting an
+                # overrunning run to a durably-tracked background operation, which then
+                # keeps running (never killed, never restarted) up to the same full
+                # budget any background=true run gets.
                 execution_request = adhoc_execution_request(
                     workspace_id=c.workspace_id,
                     workspace_root=locked_workspace,
                     command_cwd=command_cwd,
                     argv=argv,
                     working_directory_policy=c.working_directory or ".",
-                    timeout_seconds=effective_timeout,
+                    timeout_seconds=locked_repo.adhoc_timeout_seconds,
                     output_limit=self.ctx.config.server.max_tool_output_chars,
                     cancel_token=cancel_token,
                     stdin_text=stdin_text,
@@ -858,6 +859,8 @@ class WorkspaceAdhocRunner:
                     execution_evidence=execution_evidence_data,
                 )
 
+        if c.run_inline:
+            return self._execute_inline_or_promote(c, run_body, audit_details)
         if not c.background:
             return self.ctx.audited(
                 _KIND,
@@ -1250,12 +1253,9 @@ class WorkspaceAdhocRunner:
             bindings.delete_if_unchanged(binding)
         return outcome is not None
 
-    def _start_background(
+    def _require_background_infra(
         self,
-        c: WorkspaceRunAdhocCommand,
-        run_body: Callable[[CancellationToken | None, bool], WorkspaceRunAdhocResult],
-        audit_details: dict[str, object],
-    ) -> WorkspaceRunAdhocBackgroundResult:
+    ) -> tuple[OperationManager, BackgroundTaskRunner, OperationResultStore]:
         operations = self.operations
         background_tasks = self.background_tasks
         result_store = self.ctx.operation_result_store
@@ -1265,14 +1265,15 @@ class WorkspaceAdhocRunner:
                 "operation result store, and background task runner to be configured",
                 code=ErrorCode.CONFIG_INVALID,
             )
+        return operations, background_tasks, result_store
 
-        lock_cm = self.ctx.locks.lock(
-            c.workspace_id,
-            timeout_seconds=0,
-            metadata={"purpose": "workspace_run_adhoc_background"},
-        )
-        lock_cm.__enter__()
-
+    def _admit_background_adhoc(
+        self, c: WorkspaceRunAdhocCommand, operations: OperationManager
+    ) -> tuple[str, str]:
+        """Concurrency-cap check plus operation create+start, shared by
+        `_start_background()` (an ordinary `background=true` call) and #379's
+        `_execute_inline_or_promote()` (an inline call promoted after the fact). Returns
+        `(operation_id, owner_id)`."""
         now = self.ctx.clock.now_iso()
         _record, repo, _workspace = self.ctx.workspace(c.workspace_id)
         owner_id = f"worker-{self.ctx.ids.new_hex(24)}"
@@ -1280,129 +1281,167 @@ class WorkspaceAdhocRunner:
             datetime.fromisoformat(now)
             + timedelta(seconds=repo.adhoc_timeout_seconds + _OPERATION_LEASE_GRACE_SECONDS)
         ).isoformat()
-        try:
-            with self.ctx.locks.lock(
-                "background-adhoc-admission",
-                timeout_seconds=2,
-                metadata={"purpose": "background_adhoc_admission"},
-            ):
-                cap = self.ctx.config.server.max_background_profiles
-                running = sum(
-                    1
-                    for candidate in operations.list_records(max_records=2_000).records
-                    if candidate.kind == _KIND and candidate.state is OperationState.RUNNING
+        with self.ctx.locks.lock(
+            "background-adhoc-admission",
+            timeout_seconds=2,
+            metadata={"purpose": "background_adhoc_admission"},
+        ):
+            cap = self.ctx.config.server.max_background_profiles
+            running = sum(
+                1
+                for candidate in operations.list_records(max_records=2_000).records
+                if candidate.kind == _KIND and candidate.state is OperationState.RUNNING
+            )
+            if running >= cap:
+                raise RepoForgeError(
+                    f"Background workspace_run_adhoc is at its configured concurrency cap "
+                    f"of {cap} running operation(s)",
+                    code=ErrorCode.RUNTIME_UNAVAILABLE,
+                    retryable=True,
+                    safe_next_action=(
+                        f"Wait for a running background ad-hoc run to finish "
+                        f"(max_background_profiles={cap}) and retry, or poll "
+                        f"operation_list with scope='workspace:{c.workspace_id}' for progress."
+                    ),
+                    details={"max_background_profiles": cap, "running": running},
                 )
-                if running >= cap:
-                    raise RepoForgeError(
-                        f"Background workspace_run_adhoc is at its configured concurrency cap "
-                        f"of {cap} running operation(s)",
-                        code=ErrorCode.RUNTIME_UNAVAILABLE,
-                        retryable=True,
-                        safe_next_action=(
-                            f"Wait for a running background ad-hoc run to finish "
-                            f"(max_background_profiles={cap}) and retry, or poll "
-                            f"operation_list with scope='workspace:{c.workspace_id}' for progress."
-                        ),
-                        details={"max_background_profiles": cap, "running": running},
-                    )
-                task = operations.create(
-                    kind=_KIND,
-                    phase="queued",
-                    cancel_supported=True,
-                    workspace_id=c.workspace_id,
+            task = operations.create(
+                kind=_KIND,
+                phase="queued",
+                cancel_supported=True,
+                workspace_id=c.workspace_id,
+                now=now,
+            )
+            try:
+                task = operations.start(
+                    task.operation_id,
+                    owner_id=owner_id,
+                    lease_expires_at=lease_expires_at,
                     now=now,
                 )
-                try:
-                    task = operations.start(
+            except Exception:
+                with contextlib.suppress(Exception):
+                    operations.fail(
                         task.operation_id,
-                        owner_id=owner_id,
-                        lease_expires_at=lease_expires_at,
-                        now=now,
+                        error_code=ErrorCode.INTERNAL_ERROR.value,
+                        error_message="Background admission could not transition to running",
                     )
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        operations.fail(
-                            task.operation_id,
-                            error_code=ErrorCode.INTERNAL_ERROR.value,
-                            error_message="Background admission could not transition to running",
-                        )
-                    raise
+                raise
+        return task.operation_id, owner_id
+
+    def _finish_background_adhoc(
+        self,
+        operation_id: str,
+        owner_id: str,
+        cancel_token: CancellationToken,
+        exc: Exception | None,
+        result: WorkspaceRunAdhocResult | None,
+        operations: OperationManager,
+        result_store: OperationResultStore,
+    ) -> None:
+        """Terminal durable write shared by `_start_background()` and #379's
+        `_execute_inline_or_promote()`.
+
+        `cancel_token.is_cancelled()` is checked before `exc is None and result is not
+        None`, not after: an ad-hoc run is evidence-only, so a command killed by
+        cancellation (`os.killpg(SIGTERM)`) still returns a normal
+        `WorkspaceRunAdhocResult` (a negative `returncode`, no raised exception) rather
+        than raising -- the same shape a command that simply exited nonzero for an
+        unrelated reason would have. Checking "did it return a result" first would
+        report a cancelled run as `succeeded` (#379 finding: this was already true of
+        `_start_background()` before this method existed, confirmed by reproducing it
+        against the unmodified legacy `workspace_run_adhoc(background=true)` surface).
+        """
+        finish_now = self.ctx.clock.now_iso()
+        try:
+            operations.status(operation_id)
+        except RepoForgeError:
+            return
+        if cancel_token.is_cancelled():
+            with contextlib.suppress(Exception):
+                result_store.delete(operation_id)
+            with contextlib.suppress(RepoForgeError):
+                operations.cancelled(
+                    operation_id,
+                    owner_id=owner_id,
+                    now=finish_now,
+                )
+            return
+        if exc is None and result is not None:
+            try:
+                result_store.save(operation_id, to_data(result))
+                operations.succeed(
+                    operation_id,
+                    result_reference=f"{_KIND}:{operation_id}",
+                    owner_id=owner_id,
+                    now=finish_now,
+                )
+            except Exception as persist_exc:
+                with contextlib.suppress(Exception):
+                    result_store.delete(operation_id)
+                with contextlib.suppress(RepoForgeError):
+                    operations.fail(
+                        operation_id,
+                        error_code=ErrorCode.STATE_PERSISTENCE_FAILED.value,
+                        error_message=_safe_error_message(str(persist_exc)),
+                        retryability=OperationRetryability.MANUAL,
+                        owner_id=owner_id,
+                        now=finish_now,
+                    )
+            return
+        with contextlib.suppress(Exception):
+            result_store.delete(operation_id)
+        failure = exc or RepoForgeError(
+            "Background ad-hoc run completed without a result", code=ErrorCode.INTERNAL_ERROR
+        )
+        code = str(
+            getattr(
+                getattr(failure, "code", None),
+                "value",
+                getattr(failure, "code", "INTERNAL_ERROR"),
+            )
+        )
+        try:
+            normalized = ErrorCode(code)
+        except ValueError:
+            normalized = ErrorCode.INTERNAL_ERROR
+        retryable = bool(getattr(failure, "retryable", False))
+        with contextlib.suppress(RepoForgeError):
+            operations.fail(
+                operation_id,
+                error_code=normalized.value,
+                error_message=_safe_error_message(str(failure)),
+                retryability=(
+                    OperationRetryability.AUTOMATIC if retryable else OperationRetryability.MANUAL
+                ),
+                owner_id=owner_id,
+                now=finish_now,
+            )
+
+    def _start_background(
+        self,
+        c: WorkspaceRunAdhocCommand,
+        run_body: Callable[[CancellationToken | None, bool], WorkspaceRunAdhocResult],
+        audit_details: dict[str, object],
+    ) -> WorkspaceRunAdhocBackgroundResult:
+        operations, background_tasks, result_store = self._require_background_infra()
+
+        lock_cm = self.ctx.locks.lock(
+            c.workspace_id,
+            timeout_seconds=0,
+            metadata={"purpose": "workspace_run_adhoc_background"},
+        )
+        lock_cm.__enter__()
+        try:
+            operation_id, owner_id = self._admit_background_adhoc(c, operations)
         except Exception:
             lock_cm.__exit__(None, None, None)
             raise
 
-        operation_id = task.operation_id
         cancel_token = CancellationToken(
             on_bind=lambda child_pid: self._persist_worker_binding(operation_id, child_pid)
         )
         self._register_cancel_token(operation_id, cancel_token)
-
-        def finish_terminal(exc: Exception | None, result: WorkspaceRunAdhocResult | None) -> None:
-            finish_now = self.ctx.clock.now_iso()
-            try:
-                operations.status(operation_id)
-            except RepoForgeError:
-                return
-            if exc is None and result is not None:
-                try:
-                    result_store.save(operation_id, to_data(result))
-                    operations.succeed(
-                        operation_id,
-                        result_reference=f"{_KIND}:{operation_id}",
-                        owner_id=owner_id,
-                        now=finish_now,
-                    )
-                except Exception as persist_exc:
-                    with contextlib.suppress(Exception):
-                        result_store.delete(operation_id)
-                    with contextlib.suppress(RepoForgeError):
-                        operations.fail(
-                            operation_id,
-                            error_code=ErrorCode.STATE_PERSISTENCE_FAILED.value,
-                            error_message=_safe_error_message(str(persist_exc)),
-                            retryability=OperationRetryability.MANUAL,
-                            owner_id=owner_id,
-                            now=finish_now,
-                        )
-                return
-            with contextlib.suppress(Exception):
-                result_store.delete(operation_id)
-            if cancel_token.is_cancelled():
-                with contextlib.suppress(RepoForgeError):
-                    operations.cancelled(
-                        operation_id,
-                        owner_id=owner_id,
-                        now=finish_now,
-                    )
-                return
-            failure = exc or RepoForgeError(
-                "Background ad-hoc run completed without a result", code=ErrorCode.INTERNAL_ERROR
-            )
-            code = str(
-                getattr(
-                    getattr(failure, "code", None),
-                    "value",
-                    getattr(failure, "code", "INTERNAL_ERROR"),
-                )
-            )
-            try:
-                normalized = ErrorCode(code)
-            except ValueError:
-                normalized = ErrorCode.INTERNAL_ERROR
-            retryable = bool(getattr(failure, "retryable", False))
-            with contextlib.suppress(RepoForgeError):
-                operations.fail(
-                    operation_id,
-                    error_code=normalized.value,
-                    error_message=_safe_error_message(str(failure)),
-                    retryability=(
-                        OperationRetryability.AUTOMATIC
-                        if retryable
-                        else OperationRetryability.MANUAL
-                    ),
-                    owner_id=owner_id,
-                    now=finish_now,
-                )
 
         def run() -> None:
             failure: Exception | None = None
@@ -1419,7 +1458,9 @@ class WorkspaceAdhocRunner:
             finally:
                 self._unregister_cancel_token(operation_id)
                 lock_cm.__exit__(None, None, None)
-            finish_terminal(failure, result)
+            self._finish_background_adhoc(
+                operation_id, owner_id, cancel_token, failure, result, operations, result_store
+            )
             self._delete_worker_binding(operation_id)
 
         scheduled = background_tasks.submit(operation_id, run)
@@ -1441,5 +1482,113 @@ class WorkspaceAdhocRunner:
             phase="running",
             safe_next_action=(
                 "Poll operation_status; the workspace lock is held until the run completes."
+            ),
+        )
+
+    def _execute_inline_or_promote(
+        self,
+        c: WorkspaceRunAdhocCommand,
+        run_body: Callable[[CancellationToken | None, bool], WorkspaceRunAdhocResult],
+        audit_details: dict[str, object],
+    ) -> WorkspaceRunAdhocResult | WorkspaceRunAdhocBackgroundResult:
+        """#379 AC1: run the command inline, but promote it -- the exact same process,
+        never killed, never restarted -- into a durably-tracked background operation if
+        it is still running once `adhoc_inline_max_seconds` elapses. Reuses
+        `_admit_background_adhoc()`/`_finish_background_adhoc()` so a promoted run is
+        identical in every way that matters (cancellation, process-tree cleanup,
+        cross-process reaping) to an ordinary `background=true` run.
+
+        `decision_lock` resolves the one race that matters: whichever of {this method's
+        own ceiling timeout} or {`run()` finishing} observes `decided[0]` still `False`
+        first, under the lock, owns the outcome -- the other backs off. `run()`'s
+        `done.set()` happens inside the same lock acquisition as the timeout branch's
+        `done.is_set()` recheck, so there is no window where both could proceed as if
+        they won.
+        """
+        operations, background_tasks, result_store = self._require_background_infra()
+        _record, repo, _path = self.ctx.workspace(c.workspace_id)
+        inline_ceiling_seconds = min(repo.adhoc_timeout_seconds, repo.adhoc_inline_max_seconds)
+
+        done = threading.Event()
+        outcome: dict[str, object] = {}
+        decision_lock = threading.Lock()
+        decided = [False]
+        pid_box: list[int | None] = [None]
+        operation_id_box: list[str | None] = [None]
+        owner_id_box: list[str | None] = [None]
+
+        def on_bind(child_pid: int) -> None:
+            pid_box[0] = child_pid
+            if operation_id_box[0] is not None:
+                self._persist_worker_binding(operation_id_box[0], child_pid)
+
+        cancel_token = CancellationToken(on_bind=on_bind)
+
+        def run() -> None:
+            failure: Exception | None = None
+            result: WorkspaceRunAdhocResult | None = None
+            try:
+                try:
+                    result = self.ctx.audited(
+                        _KIND,
+                        audit_details,
+                        lambda: run_body(cancel_token, False),
+                    )
+                except Exception as exc:
+                    failure = exc
+            finally:
+                outcome["result"] = result
+                if failure is not None:
+                    outcome["error"] = failure
+                with decision_lock:
+                    promoted = decided[0]
+                    done.set()
+            if promoted:
+                operation_id = operation_id_box[0]
+                owner_id = owner_id_box[0]
+                if operation_id is None or owner_id is None:
+                    return
+                self._unregister_cancel_token(operation_id)
+                self._finish_background_adhoc(
+                    operation_id, owner_id, cancel_token, failure, result, operations, result_store
+                )
+                self._delete_worker_binding(operation_id)
+
+        key = f"inline-{self.ctx.ids.new_hex(16)}"
+        if not background_tasks.submit(key, run):
+            raise RepoForgeError(
+                "Inline ad-hoc execution could not be scheduled",
+                code=ErrorCode.RUNTIME_UNAVAILABLE,
+                retryable=True,
+            )
+
+        if done.wait(timeout=inline_ceiling_seconds):
+            if "error" in outcome:
+                raise cast(Exception, outcome["error"])
+            return cast(WorkspaceRunAdhocResult, outcome["result"])
+
+        with decision_lock:
+            if done.is_set():
+                # run() finished in the race window between wait()'s timeout and this
+                # lock -- nothing to promote, just read what it produced.
+                if "error" in outcome:
+                    raise cast(Exception, outcome["error"])
+                return cast(WorkspaceRunAdhocResult, outcome["result"])
+            decided[0] = True
+            operation_id, owner_id = self._admit_background_adhoc(c, operations)
+            operation_id_box[0] = operation_id
+            owner_id_box[0] = owner_id
+            if pid_box[0] is not None:
+                self._persist_worker_binding(operation_id, pid_box[0])
+            self._register_cancel_token(operation_id, cancel_token)
+
+        return WorkspaceRunAdhocBackgroundResult(
+            operation_id=operation_id,
+            phase="running",
+            safe_next_action=(
+                "This run exceeded the inline fast path's adhoc_inline_max_seconds ceiling "
+                "and is now tracked as a durable background operation with the same process "
+                "still running (it was never restarted). Poll operation_status; the "
+                "workspace lock is held until the run completes."
             ),
         )

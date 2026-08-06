@@ -88,23 +88,27 @@ def test_background_true_still_uses_the_durable_path(tmp_path: Path) -> None:
         assert status["kind"] == "workspace_run_adhoc"
 
 
-def test_inline_ceiling_exceeded_fails_fast_with_background_hint(tmp_path: Path) -> None:
-    """A foreground call bounded by the smaller adhoc_inline_max_seconds ceiling fails
-    fast (COMMAND_TIMEOUT) instead of blocking the caller for the full durable budget,
-    with a remedy pointing at background=true -- and, like every inline outcome, no
-    durable record is created for the failed attempt either."""
+def test_inline_ceiling_exceeded_promotes_instead_of_failing(tmp_path: Path) -> None:
+    """Superseded by #379: a foreground call bounded by the smaller
+    adhoc_inline_max_seconds ceiling used to fail fast (COMMAND_TIMEOUT) when #378 was
+    the only issue landed. #379 replaces that with promotion -- the exact same
+    already-running process is durably tracked instead of killed, so the caller gets
+    outcome="running" with a real operation_id, not an exception. See
+    tests/test_workspace_exec_promotion.py for the deeper same-process/no-restart and
+    race-window proofs; this test only pins down workspace_exec's own observable
+    outcome shape at the ceiling boundary."""
     env = _relaxed_env(tmp_path, adhoc_inline_max_seconds=1)
     workspace_id = env.service.workspace_create("demo", "inline ceiling exceeded")["workspace_id"]
     before = _record_count(env)
 
-    with pytest.raises(RepoForgeError) as exc:
-        env.service.workspace_exec(workspace_id, ("python3", "-c", "import time; time.sleep(2)"))
+    result = env.service.workspace_exec(
+        workspace_id, ("python3", "-c", "import time; time.sleep(2)")
+    )
 
-    assert exc.value.code is ErrorCode.COMMAND_TIMEOUT
-    remedy = exc.value.safe_next_action or ""
-    assert "background=true" in remedy
-    assert "adhoc_inline_max_seconds" in remedy
-    assert _record_count(env) == before
+    assert result["outcome"] == "running"
+    assert result["operation"] is not None
+    assert result["operation"]["kind"] == "workspace_run_adhoc"
+    assert _record_count(env) == before + 1
 
 
 def test_framework_overhead_ms_present_only_for_inline(tmp_path: Path) -> None:

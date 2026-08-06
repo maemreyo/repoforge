@@ -73,6 +73,7 @@ from .execution.coordinator import ExecutionCoordinator
 from .fingerprint_cache import FingerprintCache
 from .idempotency import IdempotencyEffectBoundary, execute_idempotent
 from .nudges import AdoptionNudgeTracker
+from .operations.completion_signals import OperationCompletionSignals
 from .repository_identity_runtime import RepositoryIdentityRuntime
 
 T = TypeVar("T")
@@ -329,6 +330,14 @@ class ApplicationContext:
     #: runtime has no lease-consumption path wired at all -- a `lease_token` presented to
     #: workspace_exec/workspace_run_adhoc is then simply ignored, not silently trusted.
     host_bypass_leases: HostBypassLeaseStore | None = None
+    #: In-process wakeup for durable-operation terminal transitions (#379 AC3). Always
+    #: constructed (pure in-memory, no adapter needed) -- unlike the optional stores above,
+    #: there is no "absent" state that means anything: it only ever removes the typical
+    #: same-process poll lag, never the correctness backstop of durable_wait's own poll loop.
+    operation_completion_signals: OperationCompletionSignals = field(
+        default_factory=OperationCompletionSignals,
+        kw_only=True,
+    )
 
     def now_epoch(self) -> float:
         try:

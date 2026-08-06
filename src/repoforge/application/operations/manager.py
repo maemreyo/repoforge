@@ -8,6 +8,7 @@ from functools import partial
 
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.operation_task import (
+    TERMINAL_OPERATION_STATES,
     OperationCancellationDecision,
     OperationRetryability,
     OperationSnapshotBinding,
@@ -156,7 +157,7 @@ class OperationManager:
             )
         if updated == current:
             return current
-        return self.ctx.audited(
+        saved = self.ctx.audited(
             "operation_transition",
             {
                 "operation_id": operation_id,
@@ -173,6 +174,11 @@ class OperationManager:
             ),
             mutating=True,
         )
+        if new_state in TERMINAL_OPERATION_STATES:
+            # After the durable write, never before -- a waiter woken by this must always
+            # see the terminal state already persisted, not race it (#379 AC3).
+            self.ctx.operation_completion_signals.fire(operation_id)
+        return saved
 
     def start(
         self,
@@ -256,7 +262,7 @@ class OperationManager:
             owner_id=None,
             lease_expires_at=None,
         )
-        return self.ctx.audited(
+        reconciled = self.ctx.audited(
             "operation_reconcile_success",
             {
                 "operation_id": operation_id,
@@ -268,6 +274,8 @@ class OperationManager:
             lambda: self.store.save(updated, expected_updated_at=current.updated_at),
             mutating=True,
         )
+        self.ctx.operation_completion_signals.fire(operation_id)
+        return reconciled
 
     def fail(
         self,
