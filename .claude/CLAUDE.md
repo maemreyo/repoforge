@@ -27,3 +27,13 @@ and "Testing expectations" sections for the full rationale.
 
 Run `./scripts/test-all.sh` only for a release candidate, to reproduce an order-dependent
 failure the selector's narrower run cannot, or when the user explicitly asks for a full run.
+
+## Deploying a fix: `git commit` alone does nothing to the live instance
+
+A running RepoForge is a frozen release copy under `~/.local/share/repoforge/releases/`, not this
+checkout. To actually ship a source change: commit (uncommitted worktree → `rf upgrade` fails
+`WORKTREE_DIRTY`), `rf upgrade --from-worktree . --keep 5` to stage without activating, then
+`rf upgrade --from-worktree . --activate --watch --health-window 90 --keep 5` to activate with
+auto-rollback. Verify via `rf runtime status`'s `running_executable`, not by importing this
+checkout's source directly — that only proves the fix, not that the deployed server has it. See
+`AGENTS.md`'s "Shipping a code fix to the live instance" for the full flow and rollback command.

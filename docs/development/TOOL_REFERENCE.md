@@ -178,11 +178,13 @@ Execution-capable results expose `execution_evidence`. Requested network/filesys
 
 Verification receipts bind environment identity plus requested/effective policy hashes. Immediately before commit, RepoForge recompiles the same profile request and re-inspects the current backend. A PATH, toolchain, adapter, effective-policy, or configuration change makes the receipt stale; run one fresh authoritative profile on the exact tree to recover.
 
-Each `workspace_verify.selector`, `selector2`, and `argv` collection accepts at most 100 items, and
-each item is limited to 4096 characters. The limits are present in the advertised JSON Schema as
-well as runtime validation. Because `mode = "plan", plan_action = "create"` allocates a new plan,
-the composite tool's MCP annotation is `idempotentHint = false` even though other modes may be
-idempotent for the same inputs.
+Each `workspace_verify.selector` and `selector2` collection accepts at most 100 items,
+and each selector item is limited to 4096 characters. An ad-hoc `argv` collection also
+accepts at most 100 elements, but each element is limited to 512 characters (see "Running
+programs that do not fit in an argv" above). The limits are present in the advertised
+JSON Schema as well as runtime validation. Because `mode = "plan", plan_action = "create"`
+allocates a new plan, the composite tool's MCP annotation is `idempotentHint = false` even
+though other modes may be idempotent for the same inputs.
 
 ### Commit, push, draft PR, and CI evidence
 

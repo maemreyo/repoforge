@@ -17,7 +17,11 @@ from .errors import ConfigError, ErrorCode, RepoForgeError
 _RUNNER_BASENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 MAX_ADHOC_RUNNERS = 32
-MAX_ADHOC_ARGV_ELEMENTS = 32
+# 100 matches the documented `workspace_verify` collection bound and the
+# CommandEvidence argv cap: a full pytest matrix (runner + ~45+ node IDs) must
+# fit in one call. Element length stays far tighter (512) and every guard on the
+# run (exact-state lock, fingerprint, output cap, timeout) is count-agnostic.
+MAX_ADHOC_ARGV_ELEMENTS = 100
 MAX_ADHOC_ARGV_ELEMENT_LENGTH = 512
 # Standard input is content, not a command argument, so it is bounded far more loosely
 # than an argv element -- a patch fed to `git apply -` is routinely longer than 512
