@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from repoforge.adapters.codegraph.command import CodeGraphCommandOutput
@@ -171,6 +172,25 @@ class FakeProjection:
         self.prepared = 0
         self.completed: list[str] = []
         self.invalidated = 0
+        self.operation_entries = 0
+        self.operation_active = False
+
+    @contextmanager
+    def operation(
+        self,
+        workspace_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> Iterator[None]:
+        del timeout_seconds
+        assert workspace_id == "workspace-1"
+        assert not self.operation_active
+        self.operation_entries += 1
+        self.operation_active = True
+        try:
+            yield
+        finally:
+            self.operation_active = False
 
     def workspace_root(self, workspace_id: str) -> Path:
         assert workspace_id == "workspace-1"

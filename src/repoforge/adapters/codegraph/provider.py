@@ -94,6 +94,14 @@ class ManagedCodeGraphProvider:
         request: CodeIntelligenceRequest,
         baseline: CodeIntelligenceResult,
     ) -> SemanticGraphEvidence:
+        with self._projection.operation(request.snapshot.workspace_id):
+            return self._analyze_locked(request, baseline)
+
+    def _analyze_locked(
+        self,
+        request: CodeIntelligenceRequest,
+        baseline: CodeIntelligenceResult,
+    ) -> SemanticGraphEvidence:
         if baseline.snapshot != request.snapshot:
             return self._unavailable("Baseline and CodeGraph snapshot identities do not match.")
 

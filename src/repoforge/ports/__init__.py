@@ -111,6 +111,7 @@ from .operator_io import OperatorIO
 from .pr_check_watch_store import PrCheckWatchPage, PrCheckWatchStore
 from .process import ProcessInspector
 from .process_reaper import ProcessReaper, ReapOutcome
+from .provider_lifecycle import ProviderWorkspaceLifecycle
 from .provider_registry import ProviderRegistry
 from .publication import (
     GitHubPublicationGateway,
@@ -249,6 +250,7 @@ __all__ = [
     "ProcessInspector",
     "ProcessReaper",
     "ProviderRegistry",
+    "ProviderWorkspaceLifecycle",
     "PublicationAuthorization",
     "PublicationAuthorizationGateway",
     "PublicationEffect",

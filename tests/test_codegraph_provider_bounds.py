@@ -17,6 +17,25 @@ from repoforge.adapters.codegraph.provider import ManagedCodeGraphProvider
 from repoforge.domain.code_intelligence import CodeIntelligenceStatus
 
 
+def test_provider_holds_operation_lock_across_command_sequence(tmp_path: Path) -> None:
+    code_request = request(tmp_path, changed=())
+    code_request.workspace_root.mkdir()
+    projection = FakeProjection(tmp_path, code_request)
+
+    class LockAssertingRunner(FakeRunner):
+        def status(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            assert projection.operation_active is True
+            return super().status(*args, **kwargs)  # type: ignore[arg-type]
+
+    runner = LockAssertingRunner(projection.source)
+    provider = ManagedCodeGraphProvider(manifest(), projection, runner)
+
+    provider.analyze(code_request, baseline(code_request))
+
+    assert projection.operation_entries == 1
+    assert projection.operation_active is False
+
+
 def test_status_file_count_mismatch_is_unavailable_and_invalidated(tmp_path: Path) -> None:
     code_request = request(tmp_path)
     code_request.workspace_root.mkdir()

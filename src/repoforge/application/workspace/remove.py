@@ -99,6 +99,8 @@ class WorkspaceRemover:
                 # as they were, and reporting those as an effect of unknown outcome would
                 # tell an operator to go inspect state that was never touched.
                 boundary.begin()
+                if self.ctx.provider_workspace_lifecycle is not None:
+                    self.ctx.provider_workspace_lifecycle.dispose_workspace(c.workspace_id)
                 deleted = self.ctx.git.remove_worktree(repo, path, record.branch, delete_branch)
                 authoritative_result = WorkspaceRemoveResult(c.workspace_id, True, deleted)
                 boundary.record_result(authoritative_result)
@@ -147,6 +149,8 @@ class WorkspaceRemover:
         def op() -> WorkspaceRemoveResult:
             with self.ctx.locks.lock(c.workspace_id):
                 boundary.begin()
+                if self.ctx.provider_workspace_lifecycle is not None:
+                    self.ctx.provider_workspace_lifecycle.dispose_workspace(c.workspace_id)
                 authoritative_result = WorkspaceRemoveResult(c.workspace_id, True, False)
                 boundary.record_result(authoritative_result)
                 self.ctx.store.delete(c.workspace_id)

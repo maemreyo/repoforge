@@ -389,39 +389,45 @@ Commit: `feat(codegraph): augment baseline and widen verification`
 
 **Files:**
 - Create: `src/repoforge/adapters/codegraph/canaries.py`
+- Create: `src/repoforge/adapters/codegraph/canary_corpus.py`
+- Create: `src/repoforge/adapters/codegraph/canary_probe.py`
 - Create: `src/repoforge/adapters/codegraph/receipts.py`
 - Create: `src/repoforge/adapters/codegraph/lifecycle.py`
+- Create: `src/repoforge/ports/provider_lifecycle.py`
 - Create: `tests/fixtures/codegraph_canary/**`
 - Modify: `src/repoforge/adapters/code_intelligence/calibration-v1.json`
-- Modify: workspace disposal/startup cleanup integration points discovered in implementation
+- Modify: managed projection/provider, bootstrap startup cleanup, and workspace removal integration points
 - Test: `tests/test_codegraph_canaries.py`
 - Test: `tests/test_codegraph_lifecycle.py`
+- Test: projection/provider/removal regression suites
 
 **Interfaces:**
-- Produces: `PromotionIdentity`, `PromotionReceipt`, `CodeGraphCanaryRunner.ensure_promoted`, and cleanup hooks.
+- Produces: `PromotionIdentity`, `PromotionReceipt`, `CodeGraphCanaryRunner.ensure_promoted`, `PromotedCodeGraphProvider`, and provider-state lifecycle hooks.
 - Consumes: executable/version/platform/manifest/options/schema/corpus digests and the managed command/projection layers.
 
-- [ ] **Step 1: Write failing canary tests**
+- [x] **Step 1: Write failing canary tests**
 
-Cover required and forbidden edges, affected-test recall, deterministic clean reruns, schema drift, unsupported file handling, incremental deletion, timeout/cancellation cleanup, denied file exclusion, unchanged worktree status, and receipt invalidation for every promotion identity field.
+Cover required and forbidden edges, affected-test recall, deterministic clean reruns, schema drift, unsupported file handling, incremental deletion, timeout/cancellation cleanup, excluded-path enforcement, unchanged source state, receipt invalidation for every promotion identity field, operation locking, startup cleanup, and workspace disposal.
 
-- [ ] **Step 2: Run tests and prove RED**
+- [x] **Step 2: Run tests and prove RED**
 
-Run: `pytest tests/test_codegraph_canaries.py tests/test_codegraph_lifecycle.py -q`
-
-- [ ] **Step 3: Implement canonical receipt identity**
-
-Hash exact executable digest/version, platform/architecture, manifest hash, options digest, adapter schema version, and canary corpus digest. Persist only canonical identities, bounded metrics, gate outcomes, and timestamps.
-
-- [ ] **Step 4: Gate provider use and lifecycle cleanup**
-
-Before graph evidence can be current, require a matching successful receipt or run canaries within `canary_timeout_seconds`. Cleanup incomplete temporary projections on startup and remove workspace provider state only after contained commands stop. Never inspect or delete a worktree `.codegraph` directory.
-
-- [ ] **Step 5: Add calibration evidence and commit**
-
-Add a `codegraph` calibration entry backed by canary affected-test recall.
+Behavioral RED evidence covered 21 unimplemented receipt/canary/lifecycle cases plus four operation-lock and managed cleanup failures.
 
 Run: `pytest tests/test_codegraph_canaries.py tests/test_codegraph_lifecycle.py -q`
+
+- [x] **Step 3: Implement canonical receipt identity**
+
+The identity hashes exact executable digest/version, platform/architecture, manifest hash, options digest, adapter schema version, and embedded corpus digest. The store persists successful canonical receipts only, with bounded metrics, typed gate outcomes, timestamps, corruption rejection, and symlink-safe receipt reads.
+
+- [x] **Step 4: Gate provider use and lifecycle cleanup**
+
+Current graph evidence requires a matching receipt or successful canary run within `canary_timeout_seconds`. The production probe uses a managed embedded corpus, two deterministic passes, incremental deletion, bounded cleanup, and unchanged-source verification. Provider commands hold one operation lock across analysis; startup removes bounded orphan/incomplete managed state; workspace removal disposes provider state before worktree deletion. No cleanup API accepts or inspects a worktree `.codegraph` path.
+
+- [x] **Step 5: Add calibration evidence and commit**
+
+A `codegraph` calibration entry records 100% reviewed canary recall for Python and TypeScript. The focused Task 7 matrix, Ruff, strict mypy, the 400-line module budget, affected-test manifest completeness, and the 251-test catalog gate pass. Promotion receipts and the managed canary corpus reject pre-existing symlink roots, and profile `test` passed on the exact final implementation tree before the commit gate.
+
+Run: `pytest tests/test_codegraph_canaries.py tests/test_codegraph_lifecycle.py tests/test_codegraph_projection.py tests/test_codegraph_provider.py tests/test_codegraph_provider_bounds.py tests/test_codegraph_augment.py tests/test_bootstrap_factories.py tests/test_workspace_stale_cleanup.py -q`
 
 Commit: `feat(codegraph): gate promotion with semantic canaries`
 

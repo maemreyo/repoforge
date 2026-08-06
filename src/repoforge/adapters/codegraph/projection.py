@@ -9,10 +9,12 @@ import os
 import shutil
 import stat
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 from ...domain.code_intelligence import CodeIntelligenceRequest
 from ...domain.codegraph_config import CodeGraphOptions
+from ...domain.errors import ConfigError
 from ...ports.locking import LockManager
 from ..filesystem.atomic import atomic_write_bytes, atomic_write_text, fsync_dir
 from .manifest import ProjectionEntry, ProjectionManifest, ProjectionResult
@@ -49,6 +51,20 @@ class CodeGraphProjection:
         self._locks = locks
         self._lock_timeout_seconds = lock_timeout_seconds
         self._fault_injector = fault_injector
+
+    def operation(
+        self,
+        workspace_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> AbstractContextManager[None]:
+        self.workspace_root(workspace_id)
+        timeout = self._lock_timeout_seconds if timeout_seconds is None else timeout_seconds
+        return self._locks.lock(
+            f"codegraph-operation-{workspace_id}",
+            timeout_seconds=timeout,
+            metadata={"provider": "codegraph", "workspace_id": workspace_id},
+        )
 
     def workspace_root(self, workspace_id: str) -> Path:
         if not workspace_id or any(
@@ -110,6 +126,74 @@ class CodeGraphProjection:
                 raise ValueError("projection incomplete marker must not be a symlink")
             marker.unlink(missing_ok=True)
             fsync_dir(workspace_state)
+
+    def read_manifest(self, workspace_id: str) -> ProjectionManifest | None:
+        workspace_state = self.workspace_root(workspace_id)
+        with self._locks.lock(
+            f"codegraph-projection-{workspace_id}",
+            timeout_seconds=self._lock_timeout_seconds,
+        ):
+            try:
+                payload = self._secure_read(workspace_state, _MANIFEST, 2_000_000)
+                return ProjectionManifest.from_json(payload.decode("utf-8"))
+            except (_ProjectionReadError, UnicodeError, ValueError):
+                return None
+
+    def dispose_workspace(self, workspace_id: str) -> None:
+        workspace_state = self.workspace_root(workspace_id)
+        with (
+            self.operation(workspace_id),
+            self._locks.lock(
+                f"codegraph-projection-{workspace_id}",
+                timeout_seconds=self._lock_timeout_seconds,
+            ),
+        ):
+            self._remove_managed(workspace_state)
+            fsync_dir(self._root)
+
+    def cleanup_workspaces(
+        self,
+        active_workspace_ids: frozenset[str],
+        *,
+        limit: int,
+    ) -> tuple[int, int, int]:
+        if not isinstance(active_workspace_ids, frozenset) or any(
+            not isinstance(workspace_id, str) or not workspace_id
+            for workspace_id in active_workspace_ids
+        ):
+            raise ValueError("active_workspace_ids must be normalized text identities")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 10_000:
+            raise ValueError("cleanup limit must be an integer between 1 and 10000")
+        removed = 0
+        skipped = 0
+        incomplete = 0
+        for candidate in sorted(self._root.iterdir(), key=lambda path: path.name)[:limit]:
+            workspace_id = candidate.name
+            try:
+                self.workspace_root(workspace_id)
+                with (
+                    self.operation(
+                        workspace_id,
+                        timeout_seconds=0,
+                    ),
+                    self._locks.lock(
+                        f"codegraph-projection-{workspace_id}",
+                        timeout_seconds=0,
+                    ),
+                ):
+                    invalid = candidate.is_symlink() or not candidate.is_dir()
+                    marker = candidate / _INCOMPLETE
+                    is_incomplete = invalid or marker.is_symlink() or marker.exists()
+                    if is_incomplete or workspace_id not in active_workspace_ids:
+                        self._remove_managed(candidate)
+                        removed += 1
+                        incomplete += int(is_incomplete)
+                        fsync_dir(self._root)
+                    else:
+                        skipped += 1
+            except (ConfigError, ValueError):
+                skipped += 1
+        return removed, skipped, incomplete
 
     def _prepare_locked(
         self,

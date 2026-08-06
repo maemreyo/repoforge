@@ -277,6 +277,70 @@ def test_prepare_repairs_managed_state_symlink_without_following_it(
     assert [path.relative_to(outside).as_posix() for path in outside.rglob("*")] == ["sentinel"]
 
 
+def test_dispose_removes_only_managed_state_and_preserves_worktree_codegraph(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    (workspace / "a.py").write_text("A = 1\n", encoding="utf-8")
+    user_state = workspace / ".codegraph"
+    user_state.mkdir()
+    (user_state / "sentinel").write_text("preserve\n", encoding="utf-8")
+    projection = _projection(tmp_path)
+    result = projection.prepare(_request(workspace, "a.py"), CodeGraphOptions())
+
+    projection.dispose_workspace("workspace-1")
+
+    assert not result.source_root.parent.exists()
+    assert (user_state / "sentinel").read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_startup_cleanup_removes_orphan_and_incomplete_state_boundedly(tmp_path: Path) -> None:
+    projection = _projection(tmp_path)
+    root = tmp_path / "state" / "providers" / "codegraph" / "workspaces"
+    active = root / "active"
+    incomplete = root / "incomplete"
+    orphan = root / "orphan"
+    for state in (active, incomplete, orphan):
+        (state / "source").mkdir(parents=True)
+    (active / "projection.json").write_text("{}", encoding="utf-8")
+    (incomplete / "INCOMPLETE").write_text("failed\n", encoding="utf-8")
+
+    removed, skipped, incomplete_count = projection.cleanup_workspaces(
+        frozenset({"active", "incomplete"}),
+        limit=3,
+    )
+
+    assert (removed, skipped, incomplete_count) == (2, 1, 1)
+    assert active.is_dir()
+    assert not incomplete.exists()
+    assert not orphan.exists()
+
+
+def test_startup_cleanup_skips_workspace_with_active_operation(tmp_path: Path) -> None:
+    projection = _projection(tmp_path)
+    root = tmp_path / "state" / "providers" / "codegraph" / "workspaces"
+    busy = root / "busy"
+    busy.mkdir(parents=True)
+
+    with projection.operation("busy"):
+        result = projection.cleanup_workspaces(frozenset(), limit=1)
+
+    assert result == (0, 1, 0)
+    assert busy.is_dir()
+
+
+def test_startup_cleanup_honors_candidate_limit(tmp_path: Path) -> None:
+    projection = _projection(tmp_path)
+    root = tmp_path / "state" / "providers" / "codegraph" / "workspaces"
+    for name in ("a", "b", "c"):
+        (root / name).mkdir(parents=True)
+
+    result = projection.cleanup_workspaces(frozenset(), limit=2)
+
+    assert result[0] == 2
+    assert len(tuple(root.iterdir())) == 1
+
+
 def test_manifest_round_trip_rejects_tampered_digest(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     (workspace / "a.py").write_text("A = 1\n", encoding="utf-8")

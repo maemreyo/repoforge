@@ -40,7 +40,7 @@ from .adapters.code_intelligence import (
     SyntaxCodeIntelligenceProvider,
     TreeSitterCodeIntelligenceProvider,
 )
-from .adapters.codegraph import build_repository_code_intelligence
+from .adapters.codegraph import build_codegraph_runtime
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
@@ -288,6 +288,7 @@ from .ports import (
     ProcessInspector,
     ProcessReaper,
     ProviderRegistry,
+    ProviderWorkspaceLifecycle,
     PullRequestGateway,
     RepositoryBindingStore,
     RepositoryDiscovery,
@@ -380,6 +381,10 @@ class AdapterOverrides:
         kw_only=True,
     )
     code_intelligence: CodeIntelligenceProvider | None = None
+    provider_workspace_lifecycle: ProviderWorkspaceLifecycle | None = field(
+        default=None,
+        kw_only=True,
+    )
     approvals: ApprovalStore | None = None
     approval_payloads: ApprovalPayloadStore | None = None
     issue_mutations: IssueMutationGateway | None = None
@@ -1798,6 +1803,7 @@ def build_application(
         observe=observe_repository_identity,
         clock=clock,
     )
+    provider_workspace_lifecycle = o.provider_workspace_lifecycle
     if o.code_intelligence is not None:
         code_intelligence = o.code_intelligence
     else:
@@ -1805,13 +1811,26 @@ def build_application(
             primary=TreeSitterCodeIntelligenceProvider(),
             fallback=SyntaxCodeIntelligenceProvider(),
         )
-        code_intelligence = build_repository_code_intelligence(
+        codegraph_runtime = build_codegraph_runtime(
             config,
             baseline_code_intelligence,
             provider_registry,
             command,
             locks,
+            clock,
         )
+        code_intelligence = codegraph_runtime.provider
+        if provider_workspace_lifecycle is None:
+            provider_workspace_lifecycle = codegraph_runtime.lifecycle
+        if codegraph_runtime.lifecycle is not None:
+            try:
+                active_workspace_ids = frozenset(record.workspace_id for record in store.list())
+                codegraph_runtime.lifecycle.startup_cleanup(
+                    active_workspace_ids,
+                    limit=100,
+                )
+            except Exception:
+                pass
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     execution_plans = o.execution_plans or JsonExecutionPlanStore(config.server.state_root, locks)
@@ -1889,6 +1908,7 @@ def build_application(
         repository_identity_runtime=repository_identity_runtime,
         git_transport_router=git_transport_router,
         code_intelligence=code_intelligence,
+        provider_workspace_lifecycle=provider_workspace_lifecycle,
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -20,6 +21,13 @@ RELATIONSHIP_COMMAND_LIMIT = 50
 
 
 class ProjectionBoundary(Protocol):
+    def operation(
+        self,
+        workspace_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> AbstractContextManager[None]: ...
+
     def workspace_root(self, workspace_id: str) -> Path: ...
 
     def prepare(

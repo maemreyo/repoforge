@@ -2,6 +2,10 @@
   "schema_version": 1,
   "corpus": "seeded-bugs-v1",
   "providers": {
+    "codegraph": {
+      "python": {"cases": 1, "routed_test_recall": 100},
+      "typescript": {"cases": 1, "routed_test_recall": 100}
+    },
     "syntax": {
       "javascript": {"cases": 1, "routed_test_recall": 0},
       "python": {"cases": 2, "routed_test_recall": 100},
