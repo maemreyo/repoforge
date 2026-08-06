@@ -207,6 +207,7 @@ def test_resolve_active_lease_finds_the_matching_lease() -> None:
         [lease],
         raw_token=raw,
         repository_identity="demo",
+        checkout_identity="demo",
         branch_or_ref="ai/feature",
         now=_NOW + timedelta(minutes=10),
     )
@@ -218,7 +219,11 @@ def test_resolve_active_lease_returns_none_for_no_token() -> None:
     lease = _lease(principal_token_hash=digest)
     assert (
         resolve_active_lease(
-            [lease], raw_token="", repository_identity="demo", branch_or_ref="ai/feature"
+            [lease],
+            raw_token="",
+            repository_identity="demo",
+            checkout_identity="demo",
+            branch_or_ref="ai/feature",
         )
         is None
     )
@@ -231,6 +236,23 @@ def test_resolve_active_lease_rejects_a_different_repository() -> None:
         [lease],
         raw_token=raw,
         repository_identity="other-repo",
+        checkout_identity="demo",
+        branch_or_ref="ai/feature",
+        now=_NOW + timedelta(minutes=10),
+    )
+    assert resolved is None
+
+
+def test_resolve_active_lease_rejects_a_different_checkout() -> None:
+    """AC3: a lease minted for one checkout (e.g. one worktree) must not widen
+    admission for a different checkout of the same repository and branch."""
+    raw, digest = mint_lease_token()
+    lease = _lease(principal_token_hash=digest, checkout_identity="demo")
+    resolved = resolve_active_lease(
+        [lease],
+        raw_token=raw,
+        repository_identity="demo",
+        checkout_identity="a-different-checkout",
         branch_or_ref="ai/feature",
         now=_NOW + timedelta(minutes=10),
     )
@@ -244,6 +266,7 @@ def test_resolve_active_lease_rejects_a_different_branch() -> None:
         [lease],
         raw_token=raw,
         repository_identity="demo",
+        checkout_identity="demo",
         branch_or_ref="ai/some-other-branch",
         now=_NOW + timedelta(minutes=10),
     )
@@ -257,6 +280,7 @@ def test_resolve_active_lease_rejects_an_expired_lease() -> None:
         [lease],
         raw_token=raw,
         repository_identity="demo",
+        checkout_identity="demo",
         branch_or_ref="ai/feature",
         now=_NOW + timedelta(hours=1),
     )
@@ -270,6 +294,7 @@ def test_resolve_active_lease_rejects_a_revoked_lease() -> None:
         [lease],
         raw_token=raw,
         repository_identity="demo",
+        checkout_identity="demo",
         branch_or_ref="ai/feature",
         now=_NOW + timedelta(minutes=10),
     )
@@ -283,6 +308,7 @@ def test_resolve_active_lease_rejects_a_wrong_token() -> None:
         [lease],
         raw_token="a-completely-different-token",
         repository_identity="demo",
+        checkout_identity="demo",
         branch_or_ref="ai/feature",
         now=_NOW + timedelta(minutes=10),
     )
@@ -308,6 +334,7 @@ def test_resolve_active_lease_picks_the_right_one_among_several() -> None:
         [lease_a, lease_b],
         raw_token=raw_b,
         repository_identity="demo",
+        checkout_identity="demo",
         branch_or_ref="ai/feature-b",
         now=_NOW + timedelta(minutes=10),
     )
@@ -319,6 +346,7 @@ def test_resolve_active_lease_picks_the_right_one_among_several() -> None:
             [lease_a, lease_b],
             raw_token=raw_b,
             repository_identity="demo",
+            checkout_identity="demo",
             branch_or_ref="ai/feature-a",
             now=_NOW + timedelta(minutes=10),
         )

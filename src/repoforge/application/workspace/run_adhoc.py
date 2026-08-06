@@ -348,11 +348,12 @@ def _resolve_lease_for_command(
     *,
     lease_token: str | None,
     repo: RepositoryConfig,
+    checkout_identity: str,
     branch: str,
 ) -> HostBypassLease | None:
     """Resolve the active #383 `trusted_host` lease ``lease_token`` authenticates for
-    this exact repository and branch, or ``None`` if it cannot be presented, is absent,
-    or does not resolve.
+    this exact repository, checkout, and branch, or ``None`` if it cannot be presented,
+    is absent, or does not resolve.
 
     Deliberately silent about *why* it returns ``None`` (no lease store wired, feature
     disabled for this repository, or a token that is expired/revoked/scope-mismatched):
@@ -369,6 +370,7 @@ def _resolve_lease_for_command(
         leases,
         raw_token=lease_token,
         repository_identity=repo.repo_id,
+        checkout_identity=checkout_identity,
         branch_or_ref=branch,
     )
 
@@ -487,7 +489,11 @@ class WorkspaceAdhocRunner:
     ) -> WorkspaceRunAdhocResult | WorkspaceRunAdhocBackgroundResult:
         record, repo, path = self.ctx.workspace(c.workspace_id)
         lease = _resolve_lease_for_command(
-            self.ctx, lease_token=c.lease_token, repo=repo, branch=record.branch
+            self.ctx,
+            lease_token=c.lease_token,
+            repo=repo,
+            checkout_identity=record.workspace_id,
+            branch=record.branch,
         )
         if lease is None and repo.execution_mode is not ExecutionMode.RELAXED:
             raise _strict_mode_error(repo.repo_id)
@@ -815,7 +821,11 @@ class WorkspaceAdhocRunner:
         sequence, exactly like a single ad-hoc run's own bracketing -- not per element."""
         record, repo, path = self.ctx.workspace(c.workspace_id)
         lease = _resolve_lease_for_command(
-            self.ctx, lease_token=c.lease_token, repo=repo, branch=record.branch
+            self.ctx,
+            lease_token=c.lease_token,
+            repo=repo,
+            checkout_identity=record.workspace_id,
+            branch=record.branch,
         )
         if lease is None and repo.execution_mode is not ExecutionMode.RELAXED:
             raise _strict_mode_error(repo.repo_id)

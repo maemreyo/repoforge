@@ -844,6 +844,7 @@ def _grant_lease(
     env: ForgeEnvironment,
     *,
     repo_id: str,
+    checkout_identity: str,
     branch: str,
     ttl_seconds: int = 1_800,
     issued_at: datetime | None = None,
@@ -858,7 +859,7 @@ def _grant_lease(
         HostBypassLease(
             lease_id="lease-" + "a" * 24,
             repository_identity=repo_id,
-            checkout_identity=repo_id,
+            checkout_identity=checkout_identity,
             workspace_kind="managed_worktree",
             branch_or_ref=branch,
             allowed_effects=("broad_shell",),
@@ -891,7 +892,9 @@ def test_lease_widens_runner_allowlist_beyond_strict_mode(tmp_path: Path) -> Non
     env = _relaxed_env_with_trust(tmp_path)
     created = env.service.workspace_create("demo", "trusted host lease widens allowlist")
     workspace_id = created["workspace_id"]
-    token = _grant_lease(env, repo_id="demo", branch=created["branch"])
+    token = _grant_lease(
+        env, repo_id="demo", checkout_identity=workspace_id, branch=created["branch"]
+    )
 
     result = _exec(env, workspace_id, ("python3", "--version"), lease_token=token)
 
@@ -905,7 +908,9 @@ def test_lease_never_widens_circuit_breakers(tmp_path: Path) -> None:
     env = _relaxed_env_with_trust(tmp_path, runners=("git",))
     created = env.service.workspace_create("demo", "trusted host lease still blocked")
     workspace_id = created["workspace_id"]
-    token = _grant_lease(env, repo_id="demo", branch=created["branch"])
+    token = _grant_lease(
+        env, repo_id="demo", checkout_identity=workspace_id, branch=created["branch"]
+    )
 
     with pytest.raises(RepoForgeError) as exc:
         _exec(
@@ -923,7 +928,24 @@ def test_lease_scoped_to_a_different_branch_does_not_apply(tmp_path: Path) -> No
     env = _relaxed_env_with_trust(tmp_path)
     created = env.service.workspace_create("demo", "trusted host lease wrong branch")
     workspace_id = created["workspace_id"]
-    token = _grant_lease(env, repo_id="demo", branch="ai/some-other-branch")
+    token = _grant_lease(
+        env, repo_id="demo", checkout_identity=workspace_id, branch="ai/some-other-branch"
+    )
+
+    with pytest.raises(RepoForgeError) as exc:
+        _exec(env, workspace_id, ("python3", "--version"), lease_token=token)
+    assert exc.value.code is ErrorCode.EXECUTION_MODE_STRICT
+
+
+def test_lease_scoped_to_a_different_checkout_does_not_apply(tmp_path: Path) -> None:
+    """#383 AC3: a lease cannot be replayed against a different checkout than the one
+    it names, even for the exact same repository and branch (e.g. a second worktree)."""
+    env = _relaxed_env_with_trust(tmp_path)
+    created = env.service.workspace_create("demo", "trusted host lease wrong checkout")
+    workspace_id = created["workspace_id"]
+    token = _grant_lease(
+        env, repo_id="demo", checkout_identity="a-different-checkout", branch=created["branch"]
+    )
 
     with pytest.raises(RepoForgeError) as exc:
         _exec(env, workspace_id, ("python3", "--version"), lease_token=token)
@@ -939,6 +961,7 @@ def test_expired_lease_does_not_apply(tmp_path: Path) -> None:
     token = _grant_lease(
         env,
         repo_id="demo",
+        checkout_identity=workspace_id,
         branch=created["branch"],
         ttl_seconds=60,
         issued_at=datetime.now(timezone.utc) - timedelta(hours=1),
@@ -955,7 +978,7 @@ def test_wrong_token_does_not_apply(tmp_path: Path) -> None:
     env = _relaxed_env_with_trust(tmp_path)
     created = env.service.workspace_create("demo", "trusted host lease wrong token")
     workspace_id = created["workspace_id"]
-    _grant_lease(env, repo_id="demo", branch=created["branch"])
+    _grant_lease(env, repo_id="demo", checkout_identity=workspace_id, branch=created["branch"])
 
     with pytest.raises(RepoForgeError) as exc:
         _exec(env, workspace_id, ("python3", "--version"), lease_token="not-the-real-token")
@@ -969,7 +992,9 @@ def test_lease_ignored_when_repository_not_enrolled(tmp_path: Path) -> None:
     env = _relaxed_env(tmp_path)  # trusted_host_enabled defaults to False
     created = env.service.workspace_create("demo", "trusted host lease not enrolled")
     workspace_id = created["workspace_id"]
-    token = _grant_lease(env, repo_id="demo", branch=created["branch"])
+    token = _grant_lease(
+        env, repo_id="demo", checkout_identity=workspace_id, branch=created["branch"]
+    )
 
     with pytest.raises(RepoForgeError) as exc:
         _exec(env, workspace_id, ("node", "--version"), lease_token=token)

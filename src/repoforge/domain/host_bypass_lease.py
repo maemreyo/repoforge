@@ -208,12 +208,13 @@ def resolve_active_lease(
     *,
     raw_token: str,
     repository_identity: str,
+    checkout_identity: str,
     branch_or_ref: str,
     now: datetime | None = None,
 ) -> HostBypassLease | None:
     """Find the one active lease ``raw_token`` authenticates, scoped to exactly this
-    repository and branch (#383 AC3: "cannot be replayed against another checkout,
-    repository, environment, or broader effect").
+    repository, checkout, and branch (#383 AC3: "cannot be replayed against another
+    checkout, repository, environment, or broader effect").
 
     Deliberately does not distinguish "no token presented" from "token presented but
     invalid": both return ``None``, and the caller falls back to ordinary admission --
@@ -226,6 +227,7 @@ def resolve_active_lease(
     for lease in leases:
         if (
             lease.repository_identity == repository_identity
+            and lease.checkout_identity == checkout_identity
             and lease.branch_or_ref == branch_or_ref
             and lease.is_active(now=current)
             and verify_lease_token(raw_token, lease.principal_token_hash)
