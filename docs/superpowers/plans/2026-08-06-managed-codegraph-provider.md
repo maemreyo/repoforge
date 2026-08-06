@@ -25,7 +25,9 @@
 ### Task 1: Provider-neutral semantic graph contract
 
 **Files:**
+- Create: `src/repoforge/domain/code_intelligence_model.py`
 - Modify: `src/repoforge/domain/code_intelligence.py`
+- Modify: `src/repoforge/application/dto.py`
 - Modify: `src/repoforge/adapters/code_intelligence/fallback.py`
 - Modify: `src/repoforge/application/code_intelligence.py`
 - Test: `tests/test_code_intelligence.py`
@@ -59,7 +61,7 @@ def test_semantic_graph_contract_normalizes_and_sorts_facts() -> None:
 def test_baseline_result_serialization_keeps_semantic_graph_absent_value() -> None:
     result = new_code_intelligence_result(...)
     assert result.semantic_graph is None
-    assert to_data(result)["semantic_graph"] is None
+    assert "semantic_graph" not in to_data(result)
 ```
 
 - [ ] **Step 2: Run focused tests and prove RED**
@@ -68,7 +70,7 @@ Run: `pytest tests/test_code_intelligence.py -k 'semantic_graph or baseline_resu
 
 Expected: collection fails because semantic graph types and the factory argument do not exist.
 
-- [ ] **Step 3: Add immutable bounded graph types and factory validation**
+- [ ] **Step 3: Split the shared model and add immutable bounded graph types**
 
 ```python
 class CodeRelationshipKind(str, Enum):
@@ -111,22 +113,26 @@ class SemanticGraphEvidence:
     truncated: bool = False
 ```
 
-Add `semantic_graph: SemanticGraphEvidence | None = None` to `CodeIntelligenceResult` and `new_code_intelligence_result`.
+Move `CodeIntelligenceStatus`, `CodeIntelligenceMeasure`, and `AffectedTestCandidate` into `code_intelligence_model.py`, re-export them from `code_intelligence.py`, and keep `code_intelligence.py` below 400 lines. Add `semantic_graph: SemanticGraphEvidence | None = field(default=None, metadata={"omit_if_none": True})` to `CodeIntelligenceResult` and add the matching factory argument.
 
-- [ ] **Step 4: Preserve semantic graph through result-copy helpers**
+- [ ] **Step 4: Preserve disabled serialization byte-for-byte**
+
+Change `application.dto.to_data` to iterate dataclass fields and skip only fields explicitly marked `omit_if_none` whose value is `None`. All existing dataclass fields continue to serialize exactly as before.
+
+- [ ] **Step 5: Preserve semantic graph through result-copy helpers**
 
 Pass `semantic_graph=result.semantic_graph` in `fallback._with_limitation` and `application.code_intelligence._with_listing_limitation`.
 
-- [ ] **Step 5: Run focused tests and prove GREEN**
+- [ ] **Step 6: Run focused tests and prove GREEN**
 
 Run: `pytest tests/test_code_intelligence.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/repoforge/domain/code_intelligence.py src/repoforge/adapters/code_intelligence/fallback.py src/repoforge/application/code_intelligence.py tests/test_code_intelligence.py
+git add src/repoforge/domain/code_intelligence_model.py src/repoforge/domain/code_intelligence.py src/repoforge/application/dto.py src/repoforge/adapters/code_intelligence/fallback.py src/repoforge/application/code_intelligence.py tests/test_code_intelligence.py
 git commit -m "feat(code-intelligence): add semantic graph contract"
 ```
 
