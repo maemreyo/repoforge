@@ -249,22 +249,24 @@ Evidence: initial RED failed on absent projection modules; follow-up RED cycles 
 
 **Files:**
 - Create: `src/repoforge/adapters/codegraph/command.py`
+- Create: `src/repoforge/adapters/codegraph/command_contract.py`
 - Create: `tests/fixtures/fake_codegraph.py`
 - Test: `tests/test_codegraph_command.py`
+- Test: `tests/test_codegraph_command_subprocess.py`
 
 **Interfaces:**
-- Produces: `CodeGraphCommandRunner.version/init/sync/status/affected/query/callers/callees/impact`.
+- Produces: `CodeGraphCommandRunner.version/init/sync/status/affected/query/callers/callees/impact` and the pure validation/environment contract used by that runner.
 - Consumes: verified absolute executable, `CommandExecutor.run_isolated`, CodeGraph options, projection root, cancellation token.
 
-- [ ] **Step 1: Write fake-binary fault matrix tests**
+- [x] **Step 1: Write fake-binary fault matrix tests**
 
-Cover exact argv, exact environment, digest/version mismatch, timeout, cancellation, descendant cleanup, malformed UTF-8 replacement, stdout/stderr truncation, non-zero exit, stale lock, and forbidden command rejection.
+Cover exact argv, exact environment, digest/version mismatch, timeout, cancellation, descendant cleanup, malformed UTF-8 replacement, stdout/stderr truncation, non-zero exit, stale lock, forbidden command rejection, and symlinks in any managed-root path component.
 
-- [ ] **Step 2: Run tests and prove RED**
+- [x] **Step 2: Run tests and prove RED**
 
-Run: `pytest tests/test_codegraph_command.py -q`
+Run: `pytest tests/test_codegraph_command.py tests/test_codegraph_command_subprocess.py -q`
 
-- [ ] **Step 3: Implement minimal managed environment**
+- [x] **Step 3: Implement minimal managed environment**
 
 ```python
 {
@@ -284,15 +286,17 @@ Run: `pytest tests/test_codegraph_command.py -q`
 
 Invoke only the allowlisted command names with argv sequences and `run_isolated`.
 
-- [ ] **Step 4: Verify identity before semantic use**
+- [x] **Step 4: Verify identity before semantic use**
 
-Require registry availability, an absolute resolved executable, matching SHA-256, and `codegraph version` output exactly equal to the manifest pin.
+Require registry availability, an absolute resolved executable, matching SHA-256, exact manifest-version output, and managed projection/home paths with no symlink component.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
-Run: `pytest tests/test_codegraph_command.py -q`
+Run: `pytest tests/test_codegraph_command.py tests/test_codegraph_command_subprocess.py -q`
 
 Commit: `feat(codegraph): add contained CLI boundary`
+
+Evidence: fake-provider RED established the absent boundary and later exposed parent-component symlink traversal. GREEN passed 32 focused command/subprocess/registry tests; Ruff, strict mypy, test-group completeness, shadow catalog, and the 400-line module budget all passed.
 
 ### Task 5: Strict normalization and managed provider
 
