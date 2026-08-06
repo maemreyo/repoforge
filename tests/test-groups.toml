@@ -377,6 +377,8 @@ test_files = [
   "tests/test_constitution_source.py",
   "tests/test_context_pack_binding.py",
   "tests/test_context_pack_budget.py",
+  "tests/test_codegraph_assessment.py",
+  "tests/test_codegraph_augment.py",
   "tests/test_codegraph_command.py",
   "tests/test_codegraph_command_subprocess.py",
   "tests/test_codegraph_normalize.py",
@@ -399,6 +401,7 @@ test_files = [
   "tests/test_workspace_adhoc.py",
   "tests/test_workspace_exec.py",
   "tests/test_workspace_risk.py",
+  "tests/test_workspace_verify.py",
 ]
 
 [groups.github_provider]
@@ -719,6 +722,7 @@ test_files = [
   "tests/test_serve_config_generation.py",
   "tests/test_upgrade_compatibility.py",
   "tests/test_code_intelligence_integration.py",
+  "tests/test_codegraph_assessment.py",
   "tests/test_command_source_integrity.py",
   "tests/test_constitution_source.py",
   "tests/test_context_section_declarations.py",

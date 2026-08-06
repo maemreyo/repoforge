@@ -40,6 +40,7 @@ from .adapters.code_intelligence import (
     SyntaxCodeIntelligenceProvider,
     TreeSitterCodeIntelligenceProvider,
 )
+from .adapters.codegraph import build_repository_code_intelligence
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
@@ -1797,10 +1798,20 @@ def build_application(
         observe=observe_repository_identity,
         clock=clock,
     )
-    code_intelligence = o.code_intelligence or FallbackCodeIntelligenceProvider(
-        primary=TreeSitterCodeIntelligenceProvider(),
-        fallback=SyntaxCodeIntelligenceProvider(),
-    )
+    if o.code_intelligence is not None:
+        code_intelligence = o.code_intelligence
+    else:
+        baseline_code_intelligence = FallbackCodeIntelligenceProvider(
+            primary=TreeSitterCodeIntelligenceProvider(),
+            fallback=SyntaxCodeIntelligenceProvider(),
+        )
+        code_intelligence = build_repository_code_intelligence(
+            config,
+            baseline_code_intelligence,
+            provider_registry,
+            command,
+            locks,
+        )
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     execution_plans = o.execution_plans or JsonExecutionPlanStore(config.server.state_root, locks)

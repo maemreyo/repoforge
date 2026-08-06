@@ -342,41 +342,46 @@ Evidence: behavioral RED covered the unimplemented normalizer/provider surface a
 
 **Files:**
 - Create: `src/repoforge/adapters/codegraph/augment.py`
+- Create: `src/repoforge/adapters/codegraph/composition.py`
+- Create: `src/repoforge/domain/code_intelligence_routing.py`
 - Modify: `src/repoforge/adapters/code_intelligence/__init__.py`
+- Modify: `src/repoforge/adapters/codegraph/__init__.py`
 - Modify: `src/repoforge/bootstrap.py`
 - Modify: `src/repoforge/application/workspace/assessment.py`
 - Modify: `src/repoforge/application/workspace/verify.py`
 - Test: `tests/test_codegraph_augment.py`
-- Test: `tests/test_workspace_assessment.py`
+- Test: `tests/test_codegraph_assessment.py`
 - Test: `tests/test_workspace_verify.py`
 
 **Interfaces:**
-- Produces: `CodeGraphAugmentedProvider(base, graph)`.
+- Produces: `CodeGraphAugmentedProvider(base, graph)` and repository-scoped composition.
 - Preserves: baseline result identity in disabled mode; all baseline facts in enabled failure modes.
 
-- [ ] **Step 1: Write failing augmentation tests**
+- [x] **Step 1: Write failing augmentation tests**
 
-Prove disabled returns `base_result is result`; current graph is additive; unavailable, partial, stale, malformed, and exception cases retain all baseline fields; graph affected tests only union after path and diagnostic mapping; uncertainty forces final-profile fallback.
+Prove disabled returns `base_result is result`; current graph is additive; unavailable, partial, malformed, and exception cases retain all baseline fields; graph affected tests only union after path and diagnostic mapping; uncertainty forces final-profile fallback.
 
-- [ ] **Step 2: Run tests and prove RED**
+- [x] **Step 2: Run tests and prove RED**
 
-Run: `pytest tests/test_codegraph_augment.py tests/test_workspace_assessment.py tests/test_workspace_verify.py -q`
+Behavioral RED evidence covered six unimplemented augmentation/router cases, five semantic-uncertainty auto-routing cases, missing assessment metadata, and two repository opt-in composition cases.
 
-- [ ] **Step 3: Implement deterministic merge**
+- [x] **Step 3: Implement deterministic merge**
 
-The augmenter evaluates base first. If graph is disabled, return the same object. Otherwise attach `semantic_graph`, union validated affected tests, retain baseline status/coverage/confidence, and append typed widening limitations without lowering baseline measures.
+The augmenter evaluates base first. If graph is disabled, it returns the same object. Otherwise it attaches `semantic_graph`, unions only reviewed pytest candidates, retains baseline status/coverage/confidence and static facts, and appends sanitized typed widening limitations without lowering baseline measures.
 
-- [ ] **Step 4: Wire per-repository selection**
+- [x] **Step 4: Wire per-repository selection**
 
-Resolve `RepositoryConfig.code_intelligence_provider_id` against the registry. Missing or invalid enrollment constructs the baseline plus unavailable graph evidence; empty selection constructs the exact old baseline only.
+Repository selection resolves the reviewed provider ID against the registry. Missing or invalid enrollment constructs baseline plus unavailable graph evidence; empty selection constructs the exact old baseline provider. Explicit adapter overrides still bypass optional composition.
 
-- [ ] **Step 5: Widen verification explicitly**
+- [x] **Step 5: Widen verification explicitly**
 
-Assessment serializes semantic status and a widening reason. `_auto_target` may use graph-added candidates only when baseline evidence and semantic graph are current, complete, non-truncated, and above the existing confidence threshold; otherwise it selects the final profile.
+Assessment serializes semantic status, routing eligibility, and a widening reason. `_auto_target` preserves disabled-mode behavior and may use graph-backed candidates only when semantic evidence is current, 100% covered, non-truncated, and at or above the existing 95% confidence threshold; otherwise auto mode retains the final profile.
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
-Run: `pytest tests/test_codegraph_augment.py tests/test_workspace_assessment.py tests/test_workspace_verify.py -q`
+Focused verification passed 22 tests across augmentation, assessment, verification routing, bootstrap composition, and managed-state tamper recovery. Ruff, strict mypy, module-size limits, affected-test completeness, and the 249-test catalog passed. Repository profiles `test` and `verify` completed successfully, with `verify` passing all 8 steps.
+
+Run: `pytest tests/test_codegraph_augment.py tests/test_codegraph_assessment.py tests/test_workspace_verify.py tests/test_bootstrap_factories.py -q`
 
 Commit: `feat(codegraph): augment baseline and widen verification`
 
