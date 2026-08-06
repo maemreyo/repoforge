@@ -76,6 +76,7 @@ def _with_listing_limitation(
         denied_paths=result.denied_paths,
         limitations=tuple((*result.limitations, limitation)),
         truncated=True,
+        semantic_graph=result.semantic_graph,
     )
 
 
