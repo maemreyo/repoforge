@@ -302,35 +302,41 @@ Evidence: fake-provider RED established the absent boundary and later exposed pa
 
 **Files:**
 - Create: `src/repoforge/adapters/codegraph/normalize.py`
+- Create: `src/repoforge/adapters/codegraph/normalize_contract.py`
 - Create: `src/repoforge/adapters/codegraph/provider.py`
+- Create: `src/repoforge/adapters/codegraph/provider_contract.py`
+- Create: `tests/codegraph_provider_support.py`
 - Test: `tests/test_codegraph_normalize.py`
 - Test: `tests/test_codegraph_provider.py`
+- Test: `tests/test_codegraph_provider_bounds.py`
 
 **Interfaces:**
-- Produces: strict `normalize_status`, `normalize_affected`, `normalize_relationships`, and `ManagedCodeGraphProvider.analyze`.
+- Produces: strict `normalize_status`, `normalize_affected`, `normalize_query`, `normalize_relationships`, `normalize_impact`, and graph-only `ManagedCodeGraphProvider.analyze`.
 - Consumes: projection result, command runner, baseline request symbols and changed paths.
 
-- [ ] **Step 1: Write failing fixture tests**
+- [x] **Step 1: Write failing fixture tests**
 
-Cover duplicate JSON keys, trailing data, unknown relationship kinds, absolute/`./`/escaping paths, excessive nesting, duplicate facts, deterministic sorting, fan-out bounds, partial results, and no raw provider text in returned evidence.
+Cover duplicate JSON keys, trailing data, unknown relationship kinds, absolute/`./`/escaping paths, excessive nesting, duplicate facts, deterministic sorting, stale/incomplete index state, status/manifest mismatch, fan-out/byte/time bounds, partial results, and no raw provider text in returned evidence.
 
-- [ ] **Step 2: Run tests and prove RED**
+- [x] **Step 2: Run tests and prove RED**
 
-Run: `pytest tests/test_codegraph_normalize.py tests/test_codegraph_provider.py -q`
+Run: `pytest tests/test_codegraph_normalize.py tests/test_codegraph_provider.py tests/test_codegraph_provider_bounds.py -q`
 
-- [ ] **Step 3: Implement strict JSON decoding**
+- [x] **Step 3: Implement strict JSON decoding**
 
 Use `json.JSONDecoder(object_pairs_hook=...)`, reject duplicate keys and trailing data, walk the decoded tree with explicit depth/collection limits, and validate every path through the same normalized relative-path contract.
 
-- [ ] **Step 4: Implement bounded query strategy**
+- [x] **Step 4: Implement bounded query strategy**
 
-Run status, affected paths, then seeded query/callers/callees/impact only for baseline symbols in requested or changed paths. Enforce changed-path, symbol, relationship, affected-path, aggregate-byte, depth, and total-wall-time bounds. Reaching a bound yields `partial` evidence with a limitation.
+Run status, affected paths, then seeded query/callers/callees/impact only for baseline symbols in requested or changed paths. Enforce changed-path, symbol, relationship, affected-path, aggregate-byte, depth, and total-wall-time bounds. Reaching a bound yields `partial` evidence with a limitation. Completion is published only after status matches the pinned version, managed paths, usable index state, and projection file count.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
-Run: `pytest tests/test_codegraph_normalize.py tests/test_codegraph_provider.py -q`
+Run: `pytest tests/test_codegraph_normalize.py tests/test_codegraph_provider.py tests/test_codegraph_provider_bounds.py -q`
 
 Commit: `feat(codegraph): normalize semantic graph evidence`
+
+Evidence: behavioral RED covered the unimplemented normalizer/provider surface and later exposed cross-path same-name ambiguity, dangling index-symlink recovery, symlink aliases in status paths, and changed paths outside the managed projection. GREEN passed 31 focused tests, including strict schema/path drift, exact managed-path identity, deterministic graph facts, safe baseline and provider-side duplicate-symbol exclusion, projection-scoped changed paths, stale-state invalidation, manifest/status identity, aggregate output truncation, wall-time bounds, projection-derived coverage, and sanitized partial/unavailable evidence. Ruff, strict mypy, test-group completeness, the 246-test shadow catalog, and the 400-line file budget passed.
 
 ### Task 6: Baseline-preserving augmentation and routing
 
