@@ -331,7 +331,30 @@ source_globs = [
   "docs/superpowers/**",
   "src/repoforge/application/config_admin/**",
   "src/repoforge/application/configuration/**",
+  # Coverage-backed selection uses wildcard ownership for assets, but uncovered
+  # package modules require one exact reviewed owner; keep the exact entries below.
   "src/repoforge/adapters/codegraph/**",
+  "src/repoforge/adapters/codegraph/__init__.py",
+  "src/repoforge/adapters/codegraph/augment.py",
+  "src/repoforge/adapters/codegraph/canaries.py",
+  "src/repoforge/adapters/codegraph/canary_corpus.py",
+  "src/repoforge/adapters/codegraph/canary_probe.py",
+  "src/repoforge/adapters/codegraph/command.py",
+  "src/repoforge/adapters/codegraph/command_contract.py",
+  "src/repoforge/adapters/codegraph/composition.py",
+  "src/repoforge/adapters/codegraph/config.py",
+  "src/repoforge/adapters/codegraph/lifecycle.py",
+  "src/repoforge/adapters/codegraph/manifest.py",
+  "src/repoforge/adapters/codegraph/normalize.py",
+  "src/repoforge/adapters/codegraph/normalize_contract.py",
+  "src/repoforge/adapters/codegraph/operator.py",
+  "src/repoforge/adapters/codegraph/projection.py",
+  "src/repoforge/adapters/codegraph/provider.py",
+  "src/repoforge/adapters/codegraph/provider_contract.py",
+  "src/repoforge/adapters/codegraph/receipts.py",
+  "tests/codegraph_provider_support.py",
+  "tests/fixtures/fake_codegraph.py",
+  "tests/fixtures/codegraph_canary/**",
   "src/repoforge/adapters/configuration/**",
   "src/repoforge/config.py",
   "src/repoforge/application/rules/**",
@@ -341,6 +364,7 @@ source_globs = [
   "src/repoforge/domain/approval.py",
   "src/repoforge/domain/command_source.py",
   "src/repoforge/domain/codegraph_config.py",
+  "src/repoforge/domain/code_intelligence_routing.py",
   "src/repoforge/domain/auth_migration.py",
   "src/repoforge/domain/config_generation.py",
   "src/repoforge/domain/delivery.py",
@@ -615,18 +639,20 @@ test_files = [
 description = "Cross-cutting agent-facing subsystems that do not map to a single domain above: onboarding, skills, code intelligence, audit/observability, generic CLI/service composition."
 # parallel = true: this catch-all owns a few git-heavy files
 # (test_plan_execution.py, test_background_run_profile.py) but they are
-# tmp_path-isolated and xdist-safe. Serializing all 40 files to protect 2 is
+# tmp_path-isolated and xdist-safe. Serializing all 41 files to protect 2 is
 # a net time loss; their contention flakiness is addressed by the raised
 # pytest --timeout (see contracts note), not by the serial lane.
 parallel = true
-# A single 40-file xdist process exceeds the bounded profile budget. These
+# A single 41-file xdist process exceeds the bounded profile budget. These
 # reviewed contiguous resource families complete independently without
 # increasing worker count.
-parallel_shard_sizes = [12, 13, 6, 9]
+parallel_shard_sizes = [13, 13, 6, 9]
 source_globs = [
   "src/repoforge/application/onboarding/**",
   "src/repoforge/application/skills/**",
+  # Exact entries below are reviewed fallbacks when coverage has no function-body data.
   "src/repoforge/adapters/code_intelligence/**",
+  "src/repoforge/adapters/code_intelligence/__init__.py",
   "src/repoforge/adapters/audit/**",
   "src/repoforge/adapters/observability/**",
   "src/repoforge/adapters/subprocess/**",
@@ -634,6 +660,8 @@ source_globs = [
   "src/repoforge/interfaces/http/**",
   "src/repoforge/testing/**",
   "src/repoforge/ports/**",
+  "src/repoforge/ports/__init__.py",
+  "src/repoforge/ports/provider_lifecycle.py",
   "src/repoforge/bootstrap.py",
   "src/repoforge/application/service.py",
   "src/repoforge/application/nudges.py",

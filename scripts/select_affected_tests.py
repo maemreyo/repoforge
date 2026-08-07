@@ -523,11 +523,12 @@ def _select_via_coverage(
     paths (docs, data) fall back to reviewed group source_globs.
     """
     selected_files: set[str] = set(manifest.safety_bundle)
+    reviewed_test_files = {test_file for group in manifest.groups for test_file in group.test_files}
     reasons: list[str] = []
     unmapped: list[str] = []
 
     for path in remaining_paths:
-        if path.startswith("tests/") and path.endswith(".py"):
+        if path in reviewed_test_files:
             selected_files.add(path)
             reasons.append(f"{path!r} -> itself (changed test)")
         elif path.startswith(_PACKAGE_SRC_PREFIX) and path.endswith(".py"):
