@@ -440,7 +440,7 @@ def test_provider_runs_preflight_after_identity_proof_and_binds_safe_metadata() 
         config_revision=_CONFIG,
         policy_revision=_POLICY,
     )
-    assert lease.provider_metadata == material.provider_metadata
+    assert lease.provider_metadata == tuple(sorted(material.provider_metadata))
     encoded = json.dumps(lease.payload(), sort_keys=True)
     assert token not in encoded
     assert token not in json.dumps(material.safe_payload(), sort_keys=True)
