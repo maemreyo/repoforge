@@ -197,6 +197,37 @@ def test_selected_context_not_globally_active_account_observes_private_repositor
     assert selected_token in executor.calls[1]["secrets"]
 
 
+def test_repository_observation_keeps_synthetic_home_outside_the_repository(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+
+    class HomeCreatingExecutor(RecordingExecutor):
+        def run_isolated(self, argv: list[str], **kwargs: Any) -> CommandResult:
+            environment = kwargs["environment"]
+            Path(environment["HOME"]).mkdir(parents=True, exist_ok=True)
+            Path(environment["GH_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
+            return super().run_isolated(argv, **kwargs)
+
+    executor = HomeCreatingExecutor(
+        [
+            _remote("https://github.com/acme/demo.git"),
+            _ok({"id": 987654, "full_name": "acme/demo"}),
+        ]
+    )
+    observer = GhCliRepositoryObserver(executor, clock=FixedClock(NOW))
+
+    observer.observe(
+        repo,
+        expected_provider_host="github.com",
+        config_revision=_SHA,
+        context=_selected_context(),
+    )
+
+    assert not (repo.path / ".repoforge-empty-home").exists()
+    assert not (repo.path / ".repoforge-empty-gh-config").exists()
+
+
 def test_observation_anchors_on_the_provider_host_and_stable_numeric_id(tmp_path: Path) -> None:
     observer, executor = _observer(
         [
