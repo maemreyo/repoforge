@@ -69,6 +69,18 @@ def test_replacing_the_key_at_the_same_path_fails_open_verified(tmp_path: Path) 
     assert failure.value.code is ErrorCode.GIT_TRANSPORT_KEY_MISMATCH
 
 
+def test_fingerprint_uses_in_file_flag_for_portable_argv(tmp_path: Path) -> None:
+    path = _write(tmp_path / "id_work")
+    identity, executor = _identity(tmp_path)
+    identity.inspect(str(path), observed_at=NOW)
+
+    fingerprint_call = next(call for call in executor.calls if call["argv"][0] == "ssh-keygen")
+    argv = fingerprint_call["argv"]
+    assert argv[:5] == ("ssh-keygen", "-l", "-E", "sha256", "-f")
+    assert Path(argv[5]).is_absolute()
+    assert "-lf" not in argv
+
+
 def test_materialization_copies_from_verified_descriptor_and_cleans_up(tmp_path: Path) -> None:
     path = _write(tmp_path / "id_work")
     identity, executor = _identity(tmp_path)
