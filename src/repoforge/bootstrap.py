@@ -1906,9 +1906,17 @@ def build_application(
         config_generation=config_generation,
     )
     if context.publications is None:
+        reviewed_ssh_endpoints = tuple(
+            configured.transport.ssh_endpoint
+            for _profile_id, configured in sorted(config.auth_profiles.items())
+            if configured.eligibility.enabled and configured.transport.ssh_endpoint is not None
+        )
         publication_gateway = PublicationAdapter(
             commands=command,
-            repositories=DurableBindingPublicationRepositoryResolver(repository_bindings),
+            repositories=DurableBindingPublicationRepositoryResolver(
+                repository_bindings,
+                ssh_endpoints=reviewed_ssh_endpoints,
+            ),
             authorization=PinnedPublicationAuthorizationGateway(),
             capability_preflight=github_capability_preflight,
             transport=git_transport_router,
