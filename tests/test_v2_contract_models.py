@@ -31,6 +31,7 @@ EXPECTED_V2_TOOLS = (
     "workspace_diff",
     "workspace_mutate",
     "workspace_verify",
+    "workspace_exec",
     "workspace_commit",
     "workspace_push",
     "workspace_pr",
@@ -54,11 +55,11 @@ def _walk_objects(schema: object) -> list[dict[str, object]]:
     return found
 
 
-def test_v2_roster_is_static_and_exactly_twenty_eight_tools() -> None:
+def test_v2_roster_is_static_and_exactly_twenty_nine_tools() -> None:
     _, registry = _contracts()
     assert registry.V2_TOOL_NAMES == EXPECTED_V2_TOOLS
     assert tuple(registry.V2_TOOL_SPECS) == EXPECTED_V2_TOOLS
-    assert len(set(registry.V2_TOOL_NAMES)) == 28
+    assert len(set(registry.V2_TOOL_NAMES)) == 29
 
 
 def test_every_tool_has_strict_pydantic_input_and_output_models() -> None:

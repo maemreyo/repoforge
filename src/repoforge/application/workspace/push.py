@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 from ...domain.auth_profile import AuthProfileSelector
 from ...domain.errors import CommandError, ErrorCode, WorkspaceError
-from ...domain.policy import validate_branch
+from ...domain.policy import validate_workspace_branch
 from ...domain.redaction import redact_text
 from ...ports.workspace_publication import WorkspacePushPublication
 from ..context import ApplicationContext
@@ -37,7 +37,7 @@ class WorkspacePusher:
 
     def execute(self, c: WorkspacePushCommand) -> WorkspacePushResult:
         record, repo, path = self.ctx.workspace(c.workspace_id)
-        validate_branch(record.branch, repo)
+        validate_workspace_branch(record.kind, record.branch, repo)
 
         with self.ctx.locks.lock(c.workspace_id):
             fresh = self.ctx.store.load(c.workspace_id)

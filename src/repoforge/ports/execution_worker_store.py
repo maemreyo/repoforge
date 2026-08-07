@@ -26,6 +26,18 @@ class ExecutionWorkerBindingStore(Protocol):
         """Advance a binding's state under CAS, returning the updated binding."""
         ...
 
+    def update_heartbeat(
+        self,
+        worker_id: str,
+        *,
+        heartbeat_at: str,
+        loop_state: str,
+        current_operation_id: str | None,
+        recovery_completed: bool,
+    ) -> ExecutionWorkerBinding | None:
+        """Publish bounded loop progress while preserving the worker identity."""
+        ...
+
     def list_page(self, *, max_records: int = 2_000) -> ExecutionWorkerBindingPage:
         """A bounded scan; ``scan_complete`` is False when the registry was truncated.
 

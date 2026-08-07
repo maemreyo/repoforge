@@ -185,6 +185,7 @@ rf auth profile inspect personal
 rf auth resolve demo                      # what would be selected; writes nothing
 rf auth bind demo                         # persist the proposed binding
 rf auth bind demo --actor-class agent     # fill the other role slot
+rf auth bind demo --expected-revision 3   # refresh only the config revision on a stale binding
 rf auth unbind demo --actor-class human --expected-revision 3
 rf auth whoami demo --check all
 rf auth doctor demo
@@ -199,6 +200,8 @@ rf auth migrate apply demo --login example-user --plan-id … --plan-hash …
 ```
 
 Reads need no flags when one profile is eligible. Writes must name the exact state they were reviewed against: a binding revision, a lease revision, or a plan hash. `whoami` and `doctor` exit 3 when a required surface is unsatisfied or a finding blocks. Clearing the final role on a binding is refused — a binding with no profile is not representable, and dropping the binding entirely is a different decision than narrowing its actor classes.
+
+A binding that persists an older configuration revision is recoverable with a config-revision reconcile: `rf auth bind` (with `--expected-revision`) refreshes only the `config_revision` marker when the repository identity, provider host, and every profile slot are byte-for-byte unchanged and every profile is still eligible. The reviewed binding revision is required — omitting it refuses with `INPUT_REQUIRED`, supplying a wrong revision refuses with `STATE_STALE`, and any repository identity or profile change refuses with `CREDENTIAL_SCOPE_MISMATCH`. This is the operator path behind the `reconcile_binding` recovery action when the binding exists but belongs to another configuration generation.
 
 `rf auth migrate inspect --login <login>` narrows discovery to exactly that stored `gh` account, so a machine with several accounts can adopt one without logging the others out. The plan is bound to the selected login through its proposed profile and transport changes, so `apply` must re-prove the same login; a different or missing login yields a stale plan.
 

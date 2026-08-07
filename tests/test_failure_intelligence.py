@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,12 +12,14 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from repoforge.adapters.locking import FcntlLockManager
 from repoforge.adapters.persistence.json_failure_evidence_store import JsonFailureEvidenceStore
 from repoforge.application.service import CodingService
+from repoforge.application.workspace.failure_intelligence import FailureIntelligenceService
 from repoforge.bootstrap import AdapterOverrides, build_application
 from repoforge.config import load_config
 from repoforge.domain.errors import ErrorCode, RepoForgeError
 from repoforge.domain.execution_receipt import WorkspaceIdentity
 from repoforge.domain.failure_intelligence import (
     FAILURE_CLASSES,
+    ChangedPathHash,
     FailureClass,
     FailureHistorySignal,
     FailureObservation,
@@ -24,6 +27,7 @@ from repoforge.domain.failure_intelligence import (
     RecoveryActionKind,
     build_failure_evidence,
     classify_failure,
+    failure_evidence_from_payload,
     failure_evidence_payload,
 )
 from repoforge.interfaces.mcp.server import create_server
@@ -59,6 +63,16 @@ def _observation(**overrides: object) -> FailureObservation:
         "history": (),
     }
     values.update(overrides)
+    if "changed_path_hashes" not in overrides:
+        # Most tests only care about `changed_paths`; derive a matching hash per path
+        # so the FailureObservation subset invariant (changed_path_hashes <= changed_paths)
+        # is satisfied without every existing override needing to supply hashes.
+        changed_paths = values["changed_paths"]
+        assert isinstance(changed_paths, tuple)
+        values["changed_path_hashes"] = tuple(
+            ChangedPathHash(path=path, sha256=hashlib.sha256(path.encode()).hexdigest())
+            for path in changed_paths
+        )
     return FailureObservation(**values)  # type: ignore[arg-type]
 
 
@@ -267,6 +281,117 @@ def test_recovery_actions_name_only_real_v2_tools_with_reconstructible_calls() -
                 assert action.relative_paths
 
 
+def test_unexpected_mutation_recovery_action_uses_real_expected_sha256() -> None:
+    """The restore recovery action's `expected_sha256` should reflect the real
+    current-content hash computed by `FailureIntelligenceService.build()`, not the
+    unconditional `None` this module previously had to emit for lack of filesystem
+    access -- one path with a known hash, one confirmed absent (`None`)."""
+    known_hash = "a" * 64
+    observation = _observation(
+        error_code=ErrorCode.DIAGNOSTIC_UNEXPECTED_MUTATION.value,
+        changed_paths=("src/a.py", "src/b.py"),
+        changed_path_hashes=(
+            ChangedPathHash(path="src/a.py", sha256=known_hash),
+            ChangedPathHash(path="src/b.py", sha256=None),
+        ),
+    )
+    classification = classify_failure(observation)
+    assert classification.failure_class is FailureClass.UNEXPECTED_MUTATION
+    restore = next(
+        action
+        for action in classification.safe_actions
+        if action.kind is RecoveryActionKind.WORKSPACE_MUTATE
+    )
+    entries = restore.payload()["arguments"]["operations"][0]["entries"]
+    by_path = {entry["path"]: entry["expected_sha256"] for entry in entries}
+    assert by_path == {"src/a.py": known_hash, "src/b.py": None}
+
+
+def test_changed_path_hashes_must_be_subset_of_changed_paths() -> None:
+    with pytest.raises(RepoForgeError):
+        _observation(
+            changed_paths=("src/a.py",),
+            changed_path_hashes=(ChangedPathHash(path="src/other.py", sha256="a" * 64),),
+        )
+
+
+def test_recovery_action_path_hashes_only_valid_for_workspace_mutate() -> None:
+    from repoforge.domain.failure_intelligence import RecoveryAction
+
+    with pytest.raises(RepoForgeError):
+        RecoveryAction(
+            kind=RecoveryActionKind.WORKSPACE_STATUS,
+            precondition="probe",
+            workspace_id="ws-demo-01",
+            relative_paths=("src/a.py",),
+            path_hashes=(ChangedPathHash(path="src/a.py", sha256="a" * 64),),
+        )
+
+
+def test_workspace_mutate_recovery_action_round_trips_through_json_persistence(
+    tmp_path: Path,
+) -> None:
+    """Persisted evidence is encoded with `RecoveryAction.payload()` (the public,
+    reconstructable form), which nests restore paths under `operations[0].entries`
+    rather than a top-level `relative_paths`/`paths` key. Decoding must extract paths
+    (and now hashes) from that exact shape or a restored WORKSPACE_MUTATE action loses
+    its paths entirely and fails `RecoveryAction.__post_init__`'s non-empty check."""
+    known_hash = "b" * 64
+    evidence = build_failure_evidence(
+        _observation(
+            error_code=ErrorCode.DIAGNOSTIC_UNEXPECTED_MUTATION.value,
+            changed_paths=("src/a.py", "src/b.py"),
+            changed_path_hashes=(
+                ChangedPathHash(path="src/a.py", sha256=known_hash),
+                ChangedPathHash(path="src/b.py", sha256=None),
+            ),
+        ),
+        created_at="2026-07-30T00:00:00+00:00",
+    )
+    locks = FcntlLockManager(tmp_path / "locks")
+    store = JsonFailureEvidenceStore(tmp_path / "state", locks)
+    store.create(evidence)
+
+    restarted = JsonFailureEvidenceStore(tmp_path / "state", locks)
+    reloaded = restarted.read(evidence.failure_id)
+    assert reloaded == evidence
+
+    restore = next(
+        action
+        for action in reloaded.safe_actions
+        if action.kind is RecoveryActionKind.WORKSPACE_MUTATE
+    )
+    assert set(restore.relative_paths) == {"src/a.py", "src/b.py"}
+    by_path = {item.path: item.sha256 for item in restore.path_hashes}
+    assert by_path == {"src/a.py": known_hash, "src/b.py": None}
+
+    payload = failure_evidence_payload(reloaded)
+    round_tripped = failure_evidence_from_payload(payload)
+    assert round_tripped == reloaded
+
+
+def test_failure_intelligence_service_computes_real_current_content_hashes(
+    forge_env: ForgeEnvironment,
+) -> None:
+    """`FailureIntelligenceService` has the filesystem access the pure domain module
+    lacks; it must fill in `changed_path_hashes` with the real current-content hash for
+    an existing path and `None` for a path that does not exist."""
+    config = load_config(forge_env.config_path)
+    app = build_application(config)
+    service = CodingService(config, application=app)
+    workspace_id = service.workspace_create("demo", "hash probe")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id, "hello.txt", "changed for hashing\n", current["sha256"]
+    )
+
+    intelligence = FailureIntelligenceService(app.context)
+    hashes = intelligence._changed_path_hashes(workspace_id, ("hello.txt", "does/not/exist.txt"))
+    by_path = {item.path: item.sha256 for item in hashes}
+    assert by_path["hello.txt"] == hashlib.sha256(b"changed for hashing\n").hexdigest()
+    assert by_path["does/not/exist.txt"] is None
+
+
 def test_stale_plan_recovery_never_recommends_reexecuting_the_known_stale_plan_id() -> None:
     """A stale-plan failure's own `observation.plan_id` is the plan that was
     just found stale; recommending `workspace_verify(plan_action="execute",
@@ -468,7 +593,7 @@ def test_failed_plan_stage_persists_one_reusable_evidence_id_for_all_consumers(
 async def test_failure_evidence_read_is_exposed_through_actual_mcp_session(
     forge_env: ForgeEnvironment,
 ) -> None:
-    """The static 28-tool Forge v2 surface has no standalone `failure_evidence_read`
+    """The static 29-tool Forge v2 surface has no standalone `failure_evidence_read`
     tool (#180); failure evidence is reachable only through `operation(action=
     "failure_evidence")` on the durable-operation composite."""
     service, runner = _failing_service(forge_env)

@@ -7,6 +7,7 @@ import re
 from urllib.parse import urlsplit
 
 from ..domain.errors import ErrorCode, RepoForgeError
+from ..domain.git_remote_identity import ReviewedSshEndpoint
 from ..domain.repository_auth_broker import ProcessAuthContext
 from ..domain.repository_identity import (
     AuthTargetKind,
@@ -31,7 +32,11 @@ def _error(code: ErrorCode, message: str) -> RepoForgeError:
     )
 
 
-def _canonical_url(url: str) -> str:
+def _canonical_url(
+    url: str,
+    *,
+    ssh_endpoints: tuple[ReviewedSshEndpoint, ...] = (),
+) -> str:
     if not isinstance(url, str) or not url or "\x00" in url:
         raise _error(ErrorCode.PUBLICATION_TARGET_MISMATCH, "Publication URL is invalid.")
     host: str | None
@@ -55,7 +60,21 @@ def _canonical_url(url: str) -> str:
             ErrorCode.PUBLICATION_TARGET_MISMATCH,
             "Publication URL must identify exactly one owner/repository.",
         )
-    return f"{host.lower()}/{parts[0]}/{parts[1]}"
+    normalized_host = host.lower()
+    reviewed_hosts = {
+        endpoint.canonical_host
+        for endpoint in ssh_endpoints
+        if endpoint.raw_host == normalized_host
+        and endpoint.owner == parts[0]
+        and endpoint.repository == parts[1]
+    }
+    if len(reviewed_hosts) > 1:
+        raise _error(
+            ErrorCode.PUBLICATION_TARGET_MISMATCH,
+            "Publication SSH alias resolves to conflicting reviewed repository endpoints.",
+        )
+    canonical_host = next(iter(reviewed_hosts), normalized_host)
+    return f"{canonical_host}/{parts[0]}/{parts[1]}"
 
 
 def _metadata(repository_id: str, canonical_name: str) -> PublicationRepositoryMetadata:
@@ -67,8 +86,14 @@ def _metadata(repository_id: str, canonical_name: str) -> PublicationRepositoryM
 class DurableBindingPublicationRepositoryResolver:
     """Resolve effective URLs only through reviewed durable repository bindings."""
 
-    def __init__(self, bindings: RepositoryBindingStore) -> None:
+    def __init__(
+        self,
+        bindings: RepositoryBindingStore,
+        *,
+        ssh_endpoints: tuple[ReviewedSshEndpoint, ...] = (),
+    ) -> None:
         self._bindings = bindings
+        self._ssh_endpoints = ssh_endpoints
 
     def _values(self) -> tuple[RepositoryIdentityBinding, ...]:
         page = self._bindings.list_bindings(max_records=2_000)
@@ -80,7 +105,7 @@ class DurableBindingPublicationRepositoryResolver:
         return tuple(record.value for record in page.records)
 
     def resolve_url(self, url: str) -> PublicationRepositoryMetadata:
-        canonical = _canonical_url(url)
+        canonical = _canonical_url(url, ssh_endpoints=self._ssh_endpoints)
         matches = tuple(
             binding for binding in self._values() if binding.canonical_name == canonical
         )

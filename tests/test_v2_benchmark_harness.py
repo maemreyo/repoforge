@@ -476,7 +476,7 @@ def _control_identity():
         python_version="3.13.5",
         package_version="2.2.0",
         contract_version="forge_v2",
-        tool_count=28,
+        tool_count=29,
         tool_surface_hash="b" * 64,
         schema_bundle_digest="c" * 64,
     )
@@ -805,7 +805,7 @@ def test_control_plane_report_publishes_exact_identity_and_metrics(tmp_path: Pat
     raw_json = paths.json_path.read_text(encoding="utf-8")
     payload = json.loads(raw_json)
     assert payload["identity"]["git_head"] == "a" * 40
-    assert payload["identity"]["tool_count"] == 28
+    assert payload["identity"]["tool_count"] == 29
     assert payload["identity"]["tool_surface_hash"] == "b" * 64
     assert payload["metrics"]["unknown_effect_outcomes"] == 0
     assert secret not in raw_json

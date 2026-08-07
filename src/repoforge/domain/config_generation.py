@@ -648,7 +648,9 @@ _REPO_RECOGNIZED = {
     "resource_budget",
     "execution_mode",
     "adhoc_runners",
+    "adhoc_shell_runners",
     "adhoc_timeout_seconds",
+    "trusted_external_checkouts",
 }
 _SERVER_RECOGNIZED = {
     "workspace_root",
@@ -993,6 +995,15 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             removals=CapabilityDeltaKind.RESTRICTION,
             reason="ad-hoc executable allowlist changed",
         )
+        _record_set_change(
+            changes,
+            prefix + ".adhoc_shell_runners",
+            _set(left.get("adhoc_shell_runners")),
+            _set(right.get("adhoc_shell_runners")),
+            additions=CapabilityDeltaKind.EXPANSION,
+            removals=CapabilityDeltaKind.RESTRICTION,
+            reason="ad-hoc shell-script interpreter allowlist changed",
+        )
         _record_number(
             changes,
             prefix + ".adhoc_timeout_seconds",
@@ -1000,6 +1011,30 @@ def classify_capability_delta(before_text: str, after_text: str) -> CapabilityDe
             right.get("adhoc_timeout_seconds", 300),
             reason="ad-hoc process duration",
         )
+        left_checkouts = left.get("trusted_external_checkouts")
+        right_checkouts = right.get("trusted_external_checkouts")
+        left_checkout_map = left_checkouts if isinstance(left_checkouts, dict) else {}
+        right_checkout_map = right_checkouts if isinstance(right_checkouts, dict) else {}
+        _record_set_change(
+            changes,
+            prefix + ".trusted_external_checkouts",
+            _set(list(left_checkout_map)),
+            _set(list(right_checkout_map)),
+            additions=CapabilityDeltaKind.EXPANSION,
+            removals=CapabilityDeltaKind.RESTRICTION,
+            reason="trusted external checkout registry changed",
+        )
+        for alias in sorted(set(left_checkout_map) & set(right_checkout_map)):
+            if left_checkout_map[alias] != right_checkout_map[alias]:
+                changes.append(
+                    CapabilityChange(
+                        f"{prefix}.trusted_external_checkouts.{alias}",
+                        left_checkout_map[alias],
+                        right_checkout_map[alias],
+                        CapabilityDeltaKind.EXPANSION,
+                        "trusted external checkout alias now resolves to a different path",
+                    )
+                )
         _record_profile_changes(changes, prefix + ".profiles", left, right)
         _record_diagnostic_changes(changes, prefix + ".diagnostics", left, right)
         _record_formatter_changes(changes, prefix + ".formatters", left, right)

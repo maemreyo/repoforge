@@ -7,6 +7,7 @@ from ...domain.auth_profile import AuthProfileSelector
 from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import ErrorCode, RepoForgeError, WorkspaceError
 from ...domain.publishing import validate_commit_message
+from ...domain.workspace import WorkspaceKind
 from ..context import ApplicationContext
 from ..execution.requests import profile_execution_request
 from ..idempotency import IdempotencyEffectBoundary
@@ -51,7 +52,28 @@ class WorkspaceCommitter:
         self.ctx = ctx
 
     def execute(self, c: WorkspaceCommitCommand) -> WorkspaceCommitResult:
-        _, repo, path = self.ctx.workspace(c.workspace_id)
+        record, repo, path = self.ctx.workspace(c.workspace_id)
+        if record.kind is WorkspaceKind.ATTACHED_SHARED:
+            # The commit identity gateway stages with `git add --all --` -- every
+            # tracked, untracked, staged, and unstaged change in the checkout, with no
+            # path scoping at all. On an attached-shared checkout that is the operator's
+            # own, unrelated in-progress edits, partial staging, or untracked files could
+            # be silently swept into an agent commit (review finding F-004). Blocked until
+            # a scoped-index commit path exists; the operator's own git tooling -- or
+            # `workspace_exec` for an agent-driven `git add <specific paths> && git
+            # commit`, scoped exactly to intended paths -- still works directly against
+            # this checkout in the meantime.
+            raise WorkspaceError(
+                "ATTACHED_WORKSPACE_COMMIT_BLOCKED: workspace_commit stages the entire "
+                "working tree and cannot be scoped to this workspace's own changes on an "
+                "attached, operator-owned checkout",
+                safe_next_action=(
+                    "Use workspace_exec to run `git add <specific paths>` followed by "
+                    "`git commit` directly, scoped to exactly the paths this workspace "
+                    "changed, or commit through the operator's own git tooling."
+                ),
+                unchanged_state=("No commit was created; the checkout was not modified.",),
+            )
         message = validate_commit_message(c.message)
         audit_details: dict[str, object] = {
             "workspace_id": c.workspace_id,

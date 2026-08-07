@@ -284,7 +284,9 @@ def test_expired_started_claim_without_binding_is_preserved_fail_closed(tmp_path
         now=(now + timedelta(seconds=2)).isoformat(),
     )
 
-    assert report.conflicts == 1
+    assert report.conflicts == 0
+    assert report.blocked == 1
+    assert report.blockers[0].code == "containment_unconfigured"
     assert queue.read(operation.operation_id) is not None
     assert application.operations.status(operation.operation_id).state is OperationState.RUNNING
 

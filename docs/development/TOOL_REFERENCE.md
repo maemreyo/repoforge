@@ -178,11 +178,13 @@ Execution-capable results expose `execution_evidence`. Requested network/filesys
 
 Verification receipts bind environment identity plus requested/effective policy hashes. Immediately before commit, RepoForge recompiles the same profile request and re-inspects the current backend. A PATH, toolchain, adapter, effective-policy, or configuration change makes the receipt stale; run one fresh authoritative profile on the exact tree to recover.
 
-Each `workspace_verify.selector`, `selector2`, and `argv` collection accepts at most 100 items, and
-each item is limited to 4096 characters. The limits are present in the advertised JSON Schema as
-well as runtime validation. Because `mode = "plan", plan_action = "create"` allocates a new plan,
-the composite tool's MCP annotation is `idempotentHint = false` even though other modes may be
-idempotent for the same inputs.
+Each `workspace_verify.selector` and `selector2` collection accepts at most 100 items,
+and each selector item is limited to 4096 characters. An ad-hoc `argv` collection also
+accepts at most 100 elements, but each element is limited to 512 characters (see "Running
+programs that do not fit in an argv" above). The limits are present in the advertised
+JSON Schema as well as runtime validation. Because `mode = "plan", plan_action = "create"`
+allocates a new plan, the composite tool's MCP annotation is `idempotentHint = false` even
+though other modes may be idempotent for the same inputs.
 
 ### Commit, push, draft PR, and CI evidence
 
@@ -217,6 +219,10 @@ A selector is an input to choosing an identity, never a result field. It appears
 | `operation` | `get`, `wait`, `list`, `cancel`, or `failure_evidence` one durable-operation surface. `wait` long-polls one exact operation for 1–300 seconds and returns on terminal state or typed timeout, plus a progress timestamp change when `until="progress"` (the default); `since_updated_at` binds the caller's last observed state. Every operation evidence item includes bounded progress unit/message, `suggested_poll_after_s`, and an ETA when step totals and timing evidence permit it. Cancellation is a request and terminal state remains explicit. `failure_evidence` reads one exact private `failure_id` -- content-addressed, bounded, secret-redacted, restart-safe -- with normalized failure class, stable error code, exact pre/post identities, affected scope, and ordered typed recovery actions that never contain arbitrary command text. Each recovery action is exactly `{kind, precondition, arguments}`; `arguments` validates directly as the input of the named public tool, without a caller-side translation layer. |
 | `config_inspect` | Read accepted/active configuration generations, repository facts, pending changes, runtime identity, and health. |
 | `runtime_logs_read` | Read bounded redacted audit or runtime-log evidence with filters and cursors. With `source="failure_artifact"` and an `artifact_reference` it returns the complete persisted stdout and stderr of a failing command — the retrieval a failure whose selectors could not be extracted actually needs. |
+
+Operation repair is deliberately **operator-only CLI**, not a sixth MCP `operation` action. Use `rf operation repair preview OPERATION_ID` to obtain a deterministic proposal bound to the current operation, work item, child binding, and process observation. Apply only that exact proposal with `rf operation repair apply OPERATION_ID --proposal-token TOKEN`. A missing or contradictory child identity returns a typed blocker and leaves all durable state unchanged; there is no force-delete or blind requeue mode.
+
+The managed execution worker publishes bounded progress heartbeat fields in its durable binding. Runtime health reports process liveness separately from `execution_worker_progress`; a live PID with a stale heartbeat is terminated through the PID-reuse-safe lifecycle before a replacement is admitted. A replacement is never started when containment cannot be proven.
 
 `workspace_verify.mode = "plan"` additionally supports a plan lifecycle for structured multi-stage work: `plan_action = "create"` compiles reviewed profiles/diagnostics into a deterministic typed DAG and returns an immutable plan for operator review; `"accept"` admits it after revalidating every binding; `"execute"` runs it through either iteration stages or the final full boundary, returning a durable operation reference immediately (poll with `operation`). Every completed stage writes a private, bounded, content-addressed schema-v2 receipt carrying environment identity schema version and requested/effective policy hashes. A read-only iteration stage may reuse a private content-addressed schema-v2 cache entry only when workspace/input, stage definition, target identity, environment/toolchain, requested/effective policy, lockfiles, configuration, policy, and dependency receipts remain compatible; mutating and final-verification stages are always non-cacheable. A compatible legacy schema-v1 entry explains an `environment_identity_schema_changed` miss but can never grant a hit. Only the accepted plan's final verification-enabled stage can populate `last_verification`.
 

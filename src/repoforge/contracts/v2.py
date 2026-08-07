@@ -1,4 +1,4 @@
-"""Strict request and response models for the static 28-tool Forge v2 surface."""
+"""Strict request and response models for the static 29-tool Forge v2 surface."""
 
 from __future__ import annotations
 
@@ -645,14 +645,21 @@ class ExecutionPolicyDeclaration(StrictModel):
     on an operator; narrowing applies through the same pipeline as a restriction.
 
     A runner is a bare executable basename resolved through the constrained runtime
-    PATH -- never a path, never a shell string. Note that adding a shell (`bash`, `sh`)
-    is permitted and is the direct way to obtain pipes and globbing, but RepoForge
-    content-inspects `git` argv only: under a shell the git guards do not see what the
-    shell runs, which `workspace_verify` reports as `content_inspected = false`.
+    PATH -- never a path, never a shell string. `adhoc_runners` never grants shell
+    syntax on its own, but an operator could still separately allowlist `bash`/`sh`
+    there; RepoForge content-inspects `git` argv only, so under any shell runner the
+    git guards do not see what the shell runs (`workspace_verify`/`workspace_exec`
+    report `content_inspected = false`). `adhoc_shell_runners` is the reviewed,
+    narrower path for the same capability: a separate, empty-by-default allowlist of
+    interpreters `workspace_exec`'s `script` form may use, kept distinct from
+    `adhoc_runners` precisely so enabling it is its own explicit, auditable decision.
     """
 
     execution_mode: Literal["strict", "relaxed"] | None = None
     adhoc_runners: tuple[_AdhocRunnerName, ...] | None = Field(
+        default=None, max_length=_MAX_ADHOC_RUNNERS
+    )
+    adhoc_shell_runners: tuple[_AdhocRunnerName, ...] | None = Field(
         default=None, max_length=_MAX_ADHOC_RUNNERS
     )
     adhoc_timeout_seconds: int | None = Field(default=None, ge=1, le=_MAX_ADHOC_TIMEOUT_SECONDS)
@@ -749,6 +756,36 @@ class WorkspaceCreateInput(AuthSelectionInput):
             "it. A protected branch is still refused."
         ),
     )
+    attach_branch: GitRef | None = Field(
+        default=None,
+        description=(
+            "Attach to a worktree this repository's own git already tracks with this "
+            "branch checked out -- typically the operator's primary checkout -- instead of "
+            "creating or adopting anything. Mutually exclusive with `base`, "
+            "`adopt_branch`, and `attach_checkout_alias`. Creates no branch, worktree, or "
+            "file. Reattaching the same checkout returns the same workspace_id. Fails with "
+            "actionable evidence if the branch is not checked out anywhere, is checked out "
+            "in more than one worktree, the checkout is missing on disk, or the branch is "
+            "protected."
+        ),
+    )
+    attach_checkout_alias: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+        description=(
+            "Attach to a checkout the operator has explicitly registered under this alias "
+            "(never a path -- only the operator, through repository configuration, can "
+            "make a path selectable at all). Use this for a checkout outside "
+            "workspace_root that isn't a worktree of this repository's own primary "
+            "checkout, e.g. a separate clone. Mutually exclusive with `base`, "
+            "`adopt_branch`, and `attach_branch`. Creates no branch, worktree, or file. "
+            "Fails with actionable evidence if the alias is not registered, the checkout "
+            "is missing, it is not the same repository, it is in detached HEAD state, or "
+            "its branch is protected."
+        ),
+    )
 
 
 class WorkspaceCreateOutput(ToolResponse):
@@ -764,12 +801,20 @@ class WorkspaceCreateOutput(ToolResponse):
         default=False,
         description="True when `branch` is a pre-existing branch this workspace adopted.",
     )
+    attached: bool = Field(
+        default=False,
+        description=(
+            "True when this workspace operates on an existing checkout it attached to "
+            "rather than one it created or adopted a branch into."
+        ),
+    )
     warnings: tuple[str, ...] = Field(
         default=(),
         max_length=20,
         description=(
-            "Non-blocking advisories about reduced guarantees, e.g. an adopted branch. The "
-            "call succeeded; these are conditions the caller should carry forward."
+            "Non-blocking advisories about reduced guarantees, e.g. an adopted or attached "
+            "branch. The call succeeded; these are conditions the caller should carry "
+            "forward."
         ),
     )
 
@@ -948,6 +993,14 @@ class WorkspaceStatusOutput(ToolResponse):
     sections: tuple[StatusSectionEvidence, ...] = Field(default=(), max_length=3)
     fingerprint_source: Literal["cache", "scan"]
     truncated: bool = False
+    kind: Literal["managed_worktree", "adopted_worktree", "attached_shared"] = Field(
+        description=(
+            "managed_worktree: RepoForge created both the branch and the worktree. "
+            "adopted_worktree: an existing branch, worktree created by RepoForge. "
+            "attached_shared: an operator-owned checkout RepoForge did not create; "
+            "concurrent drift is observed, not refused."
+        )
+    )
     read_consistency: StatusReadConsistency = StatusReadConsistency.LOCKED
 
 
@@ -1127,9 +1180,19 @@ class ApplyPatchOperation(StrictModel):
     patch: LongText
 
 
+class RestorePathExpectation(StrictModel):
+    path: RelativePath
+    # None asserts the caller expects this path to currently be absent from the working
+    # tree; any other value must match the working tree's actual current content hash --
+    # restore is a full-content overwrite from HEAD, so this is the same proof-of-current-
+    # state guard every other destructive mutation (write/delete/move/replace_text)
+    # already requires.
+    expected_sha256: Sha256 | None = None
+
+
 class RestoreOperation(StrictModel):
     op: Literal["restore"]
-    paths: tuple[RelativePath, ...] = Field(min_length=1, max_length=100)
+    entries: tuple[RestorePathExpectation, ...] = Field(min_length=1, max_length=100)
 
 
 MutationOperation = Annotated[
@@ -1249,6 +1312,20 @@ class WorkspaceFreshnessPreflightEvidence(StrictModel):
     remote_error_code: str | None = Field(default=None, max_length=160)
 
 
+class WorkspaceConcurrentObservationEvidence(StrictModel):
+    """Present only for an attached_shared workspace (#374) whose HEAD or fingerprint no
+    longer matched what the caller expected. The mutation still proceeded -- each
+    operation's own expected_sha256 is the guard against a genuine collision with the
+    specific file it targets; this is a report of what else changed, not a refusal."""
+
+    expected_head_sha: GitObjectId | None
+    observed_head_sha: GitObjectId
+    expected_workspace_fingerprint: Sha256
+    observed_workspace_fingerprint: Sha256
+    dirty_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+    untracked_paths: tuple[RelativePath, ...] = Field(default=(), max_length=2000)
+
+
 class WorkspaceMutateOutput(ToolResponse):
     outcome: OutcomeReceiptEvidence | None = None
     workspace_id: Identifier
@@ -1266,6 +1343,7 @@ class WorkspaceMutateOutput(ToolResponse):
     syntax_diagnostics: SyntaxDiagnosticsEvidence
     transaction_id: Identifier | None = None
     freshness_preflight: WorkspaceFreshnessPreflightEvidence | None = None
+    concurrent_observation: WorkspaceConcurrentObservationEvidence | None = None
 
 
 class VerifyMode(str, Enum):
@@ -1421,13 +1499,24 @@ _Selector = _SelectorItem | _SelectorItems
 
 # An ad-hoc argv is bounded far more tightly than a selector, and the schema must say
 # so: advertising a selector's 100x4096 here let a caller build a request the schema
-# accepted and `domain.adhoc` then rejected, which reads as an arbitrary failure. These
-# must equal MAX_ADHOC_ARGV_ELEMENTS and MAX_ADHOC_ARGV_ELEMENT_LENGTH; the contracts
-# package deliberately imports no domain module, so a test pins the two together.
-_MAX_ADHOC_ARGV_ELEMENTS = 32
+# accepted and `domain.adhoc` then rejected, which reads as an arbitrary failure. The
+# element-count cap is 100 -- matching the documented collection bound and
+# CommandEvidence.argv -- but each element stays 512 characters, far tighter than a
+# selector item's 4096. These must equal MAX_ADHOC_ARGV_ELEMENTS and
+# MAX_ADHOC_ARGV_ELEMENT_LENGTH; the contracts package deliberately imports no domain
+# module, so a test pins the two together.
+_MAX_ADHOC_ARGV_ELEMENTS = 100
 _MAX_ADHOC_ARGV_ELEMENT_LENGTH = 512
 _MAX_ADHOC_STDIN_LENGTH = 64_000
+# These must equal domain.adhoc's MAX_ADHOC_SCRIPT_LENGTH and MAX_ADHOC_SEQUENCE_LENGTH,
+# same reason as the pair above: the contracts package imports no domain module, so a
+# test pins these together instead.
+_MAX_ADHOC_SCRIPT_LENGTH = 64_000
+_MAX_ADHOC_SEQUENCE_LENGTH = 8
 _AdhocArgvItem = Annotated[str, Field(min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENT_LENGTH)]
+_AdhocArgv = Annotated[
+    tuple[_AdhocArgvItem, ...], Field(min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENTS)
+]
 
 
 class WorkspaceVerifyInput(StrictModel):
@@ -1624,6 +1713,127 @@ class WorkspaceVerifyOutput(ToolResponse):
         pattern=r"^failure-chain-[a-f0-9]{24}$",
     )
     rerun_of_selectors: tuple[_SelectorItem, ...] = Field(default=(), max_length=100)
+
+
+class WorkspaceExecInput(StrictModel):
+    """First-class ad-hoc command execution (#376), superseding
+    `workspace_verify(mode="adhoc")` for the run-a-command intent -- see
+    docs/architecture/autonomy-policy-model.md §9. `workspace_verify` keeps
+    `mode="adhoc"` working during a deprecation window rather than losing it in the
+    same change; new callers should reach for this tool instead."""
+
+    workspace_id: Identifier
+    argv: tuple[_AdhocArgvItem, ...] | None = Field(
+        default=None, min_length=1, max_length=_MAX_ADHOC_ARGV_ELEMENTS
+    )
+    argv_sequence: tuple[_AdhocArgv, ...] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_ADHOC_SEQUENCE_LENGTH,
+        description=(
+            "A bounded ordered list of argv commands run in one call with fail-fast "
+            "semantics (#443): execution stops at the first non-zero exit, and each "
+            "element's exit code and truncated output are reported independently. "
+            "Additive to the single-argv form, not a substitute for shell syntax -- "
+            "each element still goes through the same content inspection a single "
+            "argv command would. Mutually exclusive with argv and script."
+        ),
+    )
+    script: str | None = Field(
+        default=None,
+        max_length=_MAX_ADHOC_SCRIPT_LENGTH,
+        description=(
+            "A reviewed multiline shell-script body (#377), run through the interpreter "
+            "named in `shell`. Bounded like stdin_text, not like an argv element -- "
+            "newlines are the whole point. Unlike argv, script content is never "
+            "inspected for git forms: classify_adhoc_command only content-inspects "
+            "when argv[0] == 'git' literally, so this does not remove a safety "
+            "guarantee the argv form had either. Requires the repository to configure "
+            "a non-empty adhoc_shell_runners allowlist. Mutually exclusive with argv "
+            "and argv_sequence."
+        ),
+    )
+    shell: Identifier | None = Field(
+        default=None,
+        description="The interpreter to run `script` with (e.g. 'sh', 'bash'); required with script.",
+    )
+    working_directory: RelativePath | None = None
+    stdin_text: str | None = Field(
+        default=None,
+        max_length=_MAX_ADHOC_STDIN_LENGTH,
+        description=(
+            "Piped to the process's standard input. Never logged or echoed in audit "
+            "records -- only its length is recorded."
+        ),
+    )
+    expected_fingerprint: Sha256 | None = None
+    expected_head_sha: GitObjectId | None = None
+    mutability: Literal["read_only", "workspace"] = Field(
+        default="read_only",
+        description=(
+            "Declares intent, not a guarantee: a command classified read_only that "
+            "changes the tree anyway is reported as read_only_violation, not silently "
+            "accepted. mutability='workspace' requires expected_head_sha and "
+            "expected_fingerprint -- an exact-state lock, since a mutating run cannot be "
+            "replayed against a workspace someone else already changed."
+        ),
+    )
+    background: bool = False
+
+    @model_validator(mode="after")
+    def validate_command_form(self) -> WorkspaceExecInput:
+        forms_set = sum(value is not None for value in (self.argv, self.argv_sequence, self.script))
+        if forms_set != 1:
+            raise ValueError("Exactly one of argv, argv_sequence, or script must be provided")
+        if (self.script is None) != (self.shell is None):
+            raise ValueError("shell is required with script, and only valid with script")
+        if self.argv_sequence is not None and self.stdin_text is not None:
+            raise ValueError(
+                "stdin_text is not supported with argv_sequence -- each element runs "
+                "with no input; use a single argv or script call, or write the input "
+                "to a workspace file the sequence's commands can read"
+            )
+        if self.mutability == "workspace" and (
+            self.expected_head_sha is None or self.expected_fingerprint is None
+        ):
+            raise ValueError(
+                "mutability='workspace' requires expected_head_sha and expected_fingerprint"
+            )
+        return self
+
+
+class WorkspaceExecOutput(ToolResponse):
+    """Every command run through this tool is evidence-only: `satisfies_commit_gate`
+    is always False, and a mutating run invalidates any prior verification receipt on
+    this workspace -- generic shell evidence never becomes a typed commit/push/PR/
+    verification receipt merely because it exited successfully."""
+
+    workspace_id: Identifier
+    outcome: Literal["passed", "failed", "running"]
+    next_action: str | None = Field(
+        default=None,
+        max_length=1000,
+        description=(
+            "What to do when this response did not finish the work -- the exact "
+            "`operation` wait to issue for a background run. Null once outcome is "
+            "passed or failed."
+        ),
+    )
+    operation: OperationEvidence | None = None
+    commands: tuple[CommandEvidence, ...] = Field(
+        default=(),
+        max_length=_MAX_ADHOC_SEQUENCE_LENGTH,
+        description=(
+            "One entry for a single argv/script run; up to _MAX_ADHOC_SEQUENCE_LENGTH "
+            "entries, in order, for argv_sequence (#443) -- fail-fast means this may be "
+            "shorter than the requested sequence if an earlier element failed."
+        ),
+    )
+    satisfies_commit_gate: bool = False
+    head_sha: GitObjectId
+    workspace_fingerprint: Sha256
+    execution_evidence: ExecutionEvidenceModel | None = None
+    adhoc_evidence: AdhocEvidence | None = None
 
 
 class ShippingChangeLimits(StrictModel):
@@ -2458,6 +2668,7 @@ MODEL_PAIRS: tuple[tuple[str, type[StrictModel], type[ToolResponse]], ...] = (
     ("workspace_diff", WorkspaceDiffInput, WorkspaceDiffOutput),
     ("workspace_mutate", WorkspaceMutateInput, WorkspaceMutateOutput),
     ("workspace_verify", WorkspaceVerifyInput, WorkspaceVerifyOutput),
+    ("workspace_exec", WorkspaceExecInput, WorkspaceExecOutput),
     ("workspace_commit", WorkspaceCommitInput, WorkspaceCommitOutput),
     ("workspace_push", WorkspacePushInput, WorkspacePushOutput),
     ("workspace_pr", WorkspacePrInput, WorkspacePrOutput),

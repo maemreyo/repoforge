@@ -1,4 +1,4 @@
-"""Forge v2 MCP composition backed by the authoritative 28-tool registry."""
+"""Forge v2 MCP composition backed by the authoritative 29-tool registry."""
 
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ from ...application.workspace.mutate import (
     MoveMutation,
     ReplaceTextMutation,
     RestoreMutation,
+    RestorePathExpectation,
     TextReplacement,
     WorkspaceMutation,
     WriteMutation,
@@ -138,12 +139,15 @@ Forge v2 connects ChatGPT to allowlisted local Git repositories through isolated
 Begin with repo_list, then use repo_task_context before creating or resuming a workspace. Exact or
 single-repository selection is pinned to the MCP session; reuse that context for later repo-scoped calls
 and do not poll repo_list again unless stale-selection recovery requires it or the user changes repos. The
-public surface is the fixed 28-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
+public surface is the fixed 29-tool Forge v2 contract; retired Forge v1 names are not aliases. Prefer bounded
 composite reads, workspace_mutate for exact-state edits, workspace_verify for reviewed diagnostics and
 profiles, and workspace_pr for draft-PR lifecycle operations. To run a command that no enrolled
-diagnostic covers, use workspace_verify mode=adhoc with an argv list -- never a shell string -- limited
-to the repository's adhoc_runners allowlist; when the runner you need is missing, propose it through
-repo_policy rather than working around it. Review workspace_diff after meaningful
+diagnostic covers, use workspace_exec with an argv list -- never a shell string -- limited to the
+repository's adhoc_runners allowlist; when the runner you need is missing, propose it through
+repo_policy rather than working around it (workspace_verify mode=adhoc still works during a
+deprecation window, but workspace_exec is the current answer to "run a command"). For pipes,
+redirects, globbing, or chaining, or to run a bounded fail-fast sequence of commands in one call,
+see workspace_exec's script/shell and argv_sequence fields. Review workspace_diff after meaningful
 changes. Run final verification immediately before workspace_commit. For desired GitHub issue graphs,
 use repo_issue mode=manage with plan/apply/status/reconcile; never substitute raw GitHub mutation.
 Resume a disconnected or new session from repo_task_context section ticket_workflow. After apply, use
@@ -223,6 +227,7 @@ _TOOL_TITLES: Mapping[str, str] = {
     "workspace_diff": "Read workspace diff",
     "workspace_mutate": "Apply exact-state workspace mutations",
     "workspace_verify": "Plan, verify, or run an allowlisted command",
+    "workspace_exec": "Run an allowlisted ad-hoc command",
     "workspace_commit": "Commit verified workspace",
     "workspace_push": "Push workspace branch",
     "workspace_pr": "Manage draft pull request",
@@ -254,10 +259,16 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "Create one worktree for a task: a fresh ai/* branch, or -- with adopt_branch -- an "
         "existing branch the instruction named. This writes: it cuts a branch and materializes "
         "a worktree on disk, with no preview mode and no dry run, from repo_id and task_slug "
-        "alone. Call it only when you intend that. To see what already exists, or to check that "
-        "this surface is reachable, use workspace_list or workspace_status -- neither creates "
-        "anything. Pass idempotency_key when resuming, so a retry rejoins the same workspace "
-        "instead of cutting a second one."
+        "alone. Call it only when you intend that. Pass attach_branch instead when the "
+        "instruction means the operator's own existing checkout -- 'work on what I have open' -- "
+        "not a new one: it creates nothing and reuses the checkout git already tracks for that "
+        "branch. Pass attach_checkout_alias instead for a checkout the operator registered that "
+        "isn't a worktree of the repository's own primary checkout -- never a raw path, only an "
+        "alias the operator already set up. To see what already exists, or to check that this "
+        "surface is reachable, use workspace_list or workspace_status -- neither creates "
+        "anything. Pass idempotency_key when resuming a fresh/adopted create, so a retry rejoins "
+        "the same workspace instead of cutting a second one; both attach_branch and "
+        "attach_checkout_alias are already idempotent on their own."
     ),
     "workspace_remove": "Remove a clean local worktree without touching remote data.",
     "workspace_list": "List bounded workspace lifecycle and cleanup evidence.",
@@ -276,10 +287,29 @@ _TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "workspace_mutate": "Atomically plan or apply typed exact-state mutations under workspace policy and budgets.",
     "workspace_verify": (
         "Plan, route, or run reviewed diagnostics and profiles, and -- under relaxed execution mode -- "
-        "run an allowlisted command directly with mode=adhoc. Ad-hoc takes an argv list, never a shell "
-        "string, and its result is evidence only: it never satisfies the commit gate. The response's "
-        "adhoc_evidence.content_inspected reports whether RepoForge inspected the command at all, which "
-        "it does for git argv only."
+        "run an allowlisted command directly with mode=adhoc, kept working during workspace_exec's "
+        "deprecation window. Prefer workspace_exec for new ad-hoc command calls. Ad-hoc takes an argv "
+        "list, never a shell string, and its result is evidence only: it never satisfies the commit "
+        "gate. The response's adhoc_evidence.content_inspected reports whether RepoForge inspected the "
+        "command at all, which it does for git argv only."
+    ),
+    "workspace_exec": (
+        "Under relaxed execution mode, run an allowlisted command directly -- the first-class answer "
+        "to 'run a command', superseding workspace_verify mode=adhoc. Its result is evidence only: it "
+        "never satisfies the commit gate. A mutating run (mutability='workspace') requires "
+        "expected_head_sha and expected_fingerprint as an exact-state lock, and invalidates any prior "
+        "verification receipt on the workspace. The response's adhoc_evidence.content_inspected reports "
+        "whether RepoForge inspected the command at all, which it does for git argv only -- every other "
+        "runner, a shell included, runs uninspected. Exactly one of three mutually exclusive forms: "
+        "argv (a list, never a shell string) for one command; script + shell for a reviewed multiline "
+        "shell-script body (pipes/redirects/globbing/chaining) run through an operator-allowlisted "
+        "interpreter (repositories.<id>.adhoc_shell_runners, empty by default) -- script content is "
+        "never inspected for git forms, the same trust level as allowlisting a shell interpreter in "
+        "adhoc_runners already is; or argv_sequence, a bounded ordered list of argv commands run with "
+        "fail-fast (stops at the first non-zero exit) in one call, each element independently evidenced. "
+        "Output larger than the inline excerpt gets a retrievable output_artifact_reference (read via "
+        "runtime_logs_read); a command with no stdin_text gets immediate EOF on stdin rather than "
+        "hanging, unless it was never expecting input at all."
     ),
     "workspace_commit": "Commit only the exact verified tree with optional exact-head and fingerprint locks.",
     "workspace_push": "Push the allowlisted ai/* branch without force and with optional remote-head locking.",
@@ -337,6 +367,11 @@ _LOCAL_DESTRUCTIVE_TOOLS = frozenset({"workspace_remove", "workspace_mutate"})
 # diagnostic, profile, adhoc) are (#225 round-3 review). MCP annotations are
 # per-tool, not per-mode, so the honest tool-wide hint is the default
 # LOCAL_MUTATE (idempotentHint=False).
+# workspace_exec is deliberately excluded too, for the same reason applied to a
+# simpler tool: it runs an arbitrary allowlisted command once per call, with no
+# read-only guarantee (a declared mutability='read_only' run can still trip
+# read_only_violation) and no guarantee that repeating the same argv is safe or
+# produces the same effect. The honest hint is the same default LOCAL_MUTATE.
 _LOCAL_IDEMPOTENT_TOOLS = frozenset({"workspace_format_changed", "operation"})
 
 
@@ -566,6 +601,7 @@ _SERVICE_METHODS: Mapping[str, str] = {
     "workspace_diff": "workspace_diff_v2",
     "workspace_mutate": "workspace_mutate",
     "workspace_verify": "workspace_verify",
+    "workspace_exec": "workspace_exec",
     "workspace_commit": "workspace_commit",
     "workspace_push": "workspace_push",
     "workspace_pr": "workspace_pr",
@@ -638,7 +674,17 @@ def _mutation_operations(raw: list[dict[str, Any]]) -> list[WorkspaceMutation]:
         elif op == "apply_patch":
             operations.append(ApplyPatchMutation(item["patch"]))
         elif op == "restore":
-            operations.append(RestoreMutation(tuple(item["paths"])))
+            operations.append(
+                RestoreMutation(
+                    tuple(
+                        RestorePathExpectation(
+                            path=entry["path"],
+                            expected_sha256=entry.get("expected_sha256"),
+                        )
+                        for entry in item["entries"]
+                    )
+                )
+            )
         else:  # pragma: no cover - discriminated Pydantic input prevents this
             raise ValueError(f"Unsupported mutation operation: {op}")
     return operations
@@ -999,18 +1045,11 @@ class ForgeV2FastMCP(FastMCP[None]):
         if tool_name in _ADMIN_METHODS:
             return self._admin_boundary.call(_ADMIN_METHODS[tool_name], **kwargs)
         method = _SERVICE_METHODS[tool_name]
-        if tool_name == "workspace_mutate":
-            expected_head_sha = kwargs.pop("expected_head_sha")
-            status = self._service_boundary.call(
-                "workspace_status_v2",
-                workspace_id=kwargs["workspace_id"],
-                sections=("local",),
-                byte_budget=60_000,
-            )
-            if status.get("head_sha") != expected_head_sha:
-                raise WorkspaceError(
-                    "STALE_WORKSPACE_HEAD: expected_head_sha does not match current HEAD"
-                )
+        # expected_head_sha for workspace_mutate used to be checked here via a side-channel
+        # status call, unconditionally. It is now checked in the application layer
+        # (WorkspaceMutator.execute), where the workspace's kind is already resolved and the
+        # check can be consistency-mode-aware (#374): exact for managed/adopted workspaces,
+        # an observation instead of a refusal for attached_shared ones.
         result = self._service_boundary.call(method, **kwargs)
         if tool_name == "repo_list":
             selection = result.get("selection")

@@ -29,7 +29,7 @@ for required in ("repo", "runtime", "config", "approval", "diagnostics", "start"
 contract = asyncio.run(build_release_contract())
 assert contract["package_version"] == repoforge.__version__
 assert contract["mcp"]["identity"] == "forge_v2"
-assert len(contract["mcp"]["tool_names"]) == 28
+assert len(contract["mcp"]["tool_names"]) == 29
 print(json.dumps({
     "status": "ok",
     "package_version": repoforge.__version__,

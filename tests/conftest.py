@@ -690,7 +690,9 @@ def create_forge_environment(
     clock: Clock | None = None,
     execution_mode: str = "strict",
     adhoc_runners: tuple[str, ...] = (),
+    adhoc_shell_runners: tuple[str, ...] = (),
     allowed_mutation_ops: tuple[str, ...] = MUTATION_OPS,
+    trusted_external_checkouts: dict[str, str] | None = None,
 ) -> ForgeEnvironment:
     remote, source = _clone_template_repo(tmp_path)
 
@@ -698,6 +700,13 @@ def create_forge_environment(
     fake_bin.mkdir()
     gh_state = tmp_path / "fake-gh-state.json"
     _write_fake_gh(fake_bin, gh_state)
+
+    trusted_checkouts_lines = ["", "[repositories.demo.trusted_external_checkouts]"]
+    for alias, checkout_path in (trusted_external_checkouts or {}).items():
+        trusted_checkouts_lines.append(f"{json.dumps(alias)} = {json.dumps(checkout_path)}")
+    trusted_checkouts_section = (
+        "\n".join(trusted_checkouts_lines) if trusted_external_checkouts else ""
+    )
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
@@ -729,6 +738,8 @@ pr_reviewers = ["reviewer"]
 no_maintainer_edit = true
 execution_mode = "{execution_mode}"
 adhoc_runners = {json.dumps(list(adhoc_runners))}
+adhoc_shell_runners = {json.dumps(list(adhoc_shell_runners))}
+{trusted_checkouts_section}
 
 [repositories.demo.profiles.quick]
 description = "Fast non-gating check"

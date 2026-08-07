@@ -180,8 +180,8 @@ def test_every_refresh_action_accepts_a_selector_because_each_reaches_the_remote
 def test_the_public_tool_roster_does_not_grow() -> None:
     bundle = render_v2_schema_bundle()
 
-    assert bundle["tool_count"] == 28
-    assert len(bundle["tools"]) == 28
+    assert bundle["tool_count"] == 29
+    assert len(bundle["tools"]) == 29
     assert bundle["contract_version"] == 2
 
 

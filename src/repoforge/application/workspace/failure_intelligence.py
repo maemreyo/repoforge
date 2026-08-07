@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, replace
 
 from ...domain.egress import (
@@ -14,6 +15,7 @@ from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.execution_plan import ExecutionPlan, PlanStage
 from ...domain.execution_receipt import StageReceipt, StageReceiptStatus, WorkspaceIdentity
 from ...domain.failure_intelligence import (
+    ChangedPathHash,
     FailureEvidence,
     FailureHistorySignal,
     FailureObservation,
@@ -21,6 +23,7 @@ from ...domain.failure_intelligence import (
     failure_compatibility_binding,
     failure_evidence_payload,
 )
+from ...domain.policy import normalize_relative_path
 from ...ports.failure_evidence_store import FailureEvidenceStore
 from ..context import ApplicationContext
 
@@ -77,6 +80,45 @@ class FailureIntelligenceService:
             signals.append(FailureHistorySignal(receipt_binding, outcome))
         return tuple(signals[-100:])
 
+    def _changed_path_hashes(
+        self, workspace_id: str, changed_paths: tuple[str, ...]
+    ) -> tuple[ChangedPathHash, ...]:
+        """Real current-content SHA-256 per `changed_path`, `None` where confirmed absent.
+
+        Best-effort: this runs from inside a failure-handling path, so any error here
+        (workspace gone, path unreadable, race with a concurrent mutation) must fall back
+        to an unknown hash rather than replace the real failure with a hashing failure.
+        Deliberately does not gate through `assert_path_allowed`'s allowed/denied_paths
+        policy -- `changed_paths` for UNEXPECTED_MUTATION failures names exactly the paths
+        that fell outside the accepted change set, so policy-scoped path filtering would
+        blind this to the paths that matter most; only workspace-root containment is
+        enforced here, mirroring what the eventual restore call itself re-checks.
+        """
+        if not changed_paths:
+            return ()
+        try:
+            _, _, workspace_root = self.ctx.workspace(workspace_id)
+            root = workspace_root.resolve(strict=True)
+        except Exception:
+            return ()
+        hashes: list[ChangedPathHash] = []
+        for path in changed_paths:
+            sha256: str | None = None
+            try:
+                normalized = normalize_relative_path(path)
+                candidate = (root / normalized).resolve(strict=False)
+                candidate.relative_to(root)
+                if (
+                    self.ctx.filesystem.is_file(candidate)
+                    and not self.ctx.filesystem.is_symlink(candidate)
+                    and self.ctx.filesystem.size(candidate) <= self.ctx.config.server.max_file_bytes
+                ):
+                    sha256 = hashlib.sha256(self.ctx.filesystem.read_bytes(candidate)).hexdigest()
+            except Exception:
+                sha256 = None
+            hashes.append(ChangedPathHash(path=path, sha256=sha256))
+        return tuple(hashes)
+
     def build(
         self,
         *,
@@ -109,6 +151,7 @@ class FailureIntelligenceService:
             failure_domain=str(domain) if isinstance(domain, str) else None,
             changed_paths=changed_paths,
             history=(),
+            changed_path_hashes=self._changed_path_hashes(plan.workspace_id, changed_paths),
         )
         binding = failure_compatibility_binding(observation_without_history)
         history = self._history(

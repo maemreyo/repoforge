@@ -15,8 +15,8 @@ from ..config import AppConfig, RepositoryConfig
 from ..domain.errors import ConfigError, ErrorCode, RepoForgeError, SecurityError, WorkspaceError
 from ..domain.observation import GitHubObservationAuthority
 from ..domain.operations import automatic_retry_allowed, unchanged_state_for
-from ..domain.policy import validate_adopted_branch, validate_branch
-from ..domain.workspace import WorkspaceRecord
+from ..domain.policy import validate_workspace_branch
+from ..domain.workspace import ConsistencyMode, WorkspaceRecord
 from ..ports import (
     ApiIdentityInspector,
     AuditSink,
@@ -352,15 +352,38 @@ class ApplicationContext:
         record = self.store.load(workspace_id)
         repo = self.repository_for_workspace(record)
         path = Path(record.path).resolve()
-        root = self.config.server.workspace_root.resolve()
-        try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise WorkspaceError(
-                f"Workspace {workspace_id} is outside the configured workspace root",
-                code=ErrorCode.WORKSPACE_OUTSIDE_ROOT,
-                details={"workspace_id": workspace_id},
-            ) from exc
+        # An attached-shared workspace is, by definition, the operator's own existing
+        # checkout: it was never expected to live under workspace_root, and never will.
+        # containment is meaningful for the kinds RepoForge itself materialized.
+        if record.kind.owns_worktree_lifecycle:
+            root = self.config.server.workspace_root.resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as exc:
+                raise WorkspaceError(
+                    f"Workspace {workspace_id} is outside the configured workspace root",
+                    code=ErrorCode.WORKSPACE_OUTSIDE_ROOT,
+                    details={"workspace_id": workspace_id},
+                ) from exc
+        attach_alias = record.metadata.get("attach_checkout_alias")
+        if isinstance(attach_alias, str):
+            # Revocation must reach a workspace already attached through this alias, not
+            # just refuse a NEW attach attempt: this is the only re-check, on every call,
+            # of whether the operator still authorizes it (review finding). Repointing the
+            # alias to a different live target is treated the same as removing it --
+            # unlike a worktree move (git-verified truth), an alias target is operator-
+            # typed config with no independent proof it still means the same checkout.
+            registered = repo.trusted_external_checkouts.get(attach_alias)
+            if registered is None or registered.resolve() != path:
+                raise SecurityError(
+                    f"ATTACH_CHECKOUT_REVOKED: {attach_alias!r} no longer authorizes "
+                    f"{path} for {workspace_id!r}",
+                    details={"workspace_id": workspace_id, "alias": attach_alias},
+                    safe_next_action=(
+                        "Re-register the alias with the operator, or remove this stale "
+                        "workspace explicitly with workspace_remove."
+                    ),
+                )
         if not path.is_dir():
             raise WorkspaceError(
                 f"Workspace directory is missing: {workspace_id}",
@@ -383,28 +406,47 @@ class ApplicationContext:
             )
         branch = self.git.current_branch(path)
         if branch != record.branch:
-            raise WorkspaceError(
-                f"Workspace branch changed unexpectedly: registry={record.branch}, actual={branch}",
-                code=ErrorCode.WORKSPACE_BRANCH_MISMATCH,
-                details={
-                    "workspace_id": workspace_id,
-                    "expected_branch": record.branch,
-                    "actual_branch": branch,
-                },
-                safe_next_action=(
-                    "Restore the recorded workspace branch without rewriting history, or create a new "
-                    "isolated workspace for the other branch."
-                ),
-            )
-        # Every workspace tool passes through here, so this is where an adopted branch is
-        # either honoured or silently unusable: the ai/* prefix rule would refuse the very
-        # branch the operator asked for on EVERY subsequent call, not just at creation.
-        # The rest of the validation -- protected branches, ref safety -- still applies,
-        # and the registry (not the request) decides which branches count as adopted.
-        if record.metadata.get("adopted_branch"):
-            validate_adopted_branch(branch, repo)
+            if record.kind.consistency_mode is ConsistencyMode.SHARED:
+                # A branch switch on the operator's own checkout is exactly the kind of
+                # concurrent state change attaching is meant to tolerate (#374, #375 AC:
+                # "branch mismatch behavior is mode-aware"). Observe and reconcile, the
+                # same self-heal #373's reattach flow already applies to a moved checkout,
+                # rather than refusing every subsequent call until something "fixes" a
+                # registry entry that is not actually wrong -- it is just stale.
+                #
+                # Validated BEFORE persisting: a denied branch (e.g. protected) must never
+                # be written into the registry as though it were the workspace's
+                # authorized state, even transiently between this save and the refusal
+                # below (review finding F-003). If it is not denied, this call is
+                # redundant with the one after the if/else -- cheap, and it keeps the
+                # invariant "never persist an observation this function is about to
+                # refuse" true without threading extra state through the branch.
+                validate_workspace_branch(record.kind, branch, repo)
+                record.branch = branch
+                record.base = branch
+                self.store.save(record)
+            else:
+                raise WorkspaceError(
+                    f"Workspace branch changed unexpectedly: registry={record.branch}, actual={branch}",
+                    code=ErrorCode.WORKSPACE_BRANCH_MISMATCH,
+                    details={
+                        "workspace_id": workspace_id,
+                        "expected_branch": record.branch,
+                        "actual_branch": branch,
+                    },
+                    safe_next_action=(
+                        "Restore the recorded workspace branch without rewriting history, or create a new "
+                        "isolated workspace for the other branch."
+                    ),
+                )
         else:
-            validate_branch(branch, repo)
+            # Every workspace tool passes through here, so this is where an adopted or
+            # attached branch is either honoured or silently unusable: the ai/* prefix
+            # rule would refuse the very branch the operator asked for on EVERY subsequent
+            # call, not just at creation. The rest of the validation -- protected
+            # branches, ref safety -- still applies, and the registry (not the request)
+            # decides which branches count as operator-named.
+            validate_workspace_branch(record.kind, branch, repo)
         return (record, repo, path)
 
     def record_metric(

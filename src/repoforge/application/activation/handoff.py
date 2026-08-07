@@ -7,21 +7,40 @@ the work -- and background operations are not guaranteed idempotent. The worker 
 (#256) is the ownership token that resolves this: the incoming generation reaps and
 releases every binding owned by a prior generation before it claims new work.
 
-A binding belongs to the current generation when its ``owner_generation`` matches (the
-schema-v2 token) or, for pre-v2 bindings that predate the token, when its owning server
-process identity (``server_pid`` + ``server_start_token``) matches the current process.
-Everything else is a prior generation's and is reconciled: its detached child is reaped
-(unless the operation kind is resumable across a handoff) and its binding released.
+A binding belongs to the current owner only when BOTH its process identity
+(``server_pid`` + ``server_start_token``) and its ``owner_generation`` agree with the
+incoming owner. The generation number alone is never sufficient: two supervisors from
+different releases can share a config generation, so a distinct process identity is what
+distinguishes the current release's worker from an old draining one. A binding whose
+identity does not match is reconciled: its detached child is reaped (unless the operation
+kind is resumable across a handoff) and its binding released.
+
+#275 also drives this reconciler on the normal execution-worker admit path (not only the
+tunnel-seam swap): a generation-bound worker must reconcile before claiming durable work
+so two generations never both admit the same operation.
 """
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 from ...domain.operation_worker import OperationWorkerBinding
 from ...ports.process_reaper import ProcessReaper
 from ...ports.worker_binding_store import WorkerBindingStore
+
+#: Exit code when admit-time handoff cannot transfer ownership (prior worker still live,
+#: scan incomplete, or unreadable binding). The worker must not start admitting work.
+EXIT_HANDOFF_CONFLICT = 7
+
+#: Audit action for generation handoff reconciliation (activation and admit paths).
+HANDOFF_AUDIT_ACTION = "generation_handoff_reconcile"
+
+
+class _AuditRecorder(Protocol):
+    def record(self, action: str, *, success: bool, details: dict[str, Any]) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,15 +168,81 @@ class GenerationHandoffReconciler:
 
     @staticmethod
     def _owned_by_current(binding: OperationWorkerBinding, owner: OwnerIdentity) -> bool:
-        # Prefer the explicit v2 generation token when both sides carry one.
-        if binding.owner_generation is not None and owner.generation is not None:
-            return binding.owner_generation == owner.generation
-        # Fall back to process identity: same pid AND same start token. A recycled
-        # pid with a different start token is a different process -> not owned.
+        # Process identity must match FIRST: two supervisors from different releases can
+        # share a config_generation (#275), so a generation number alone must never
+        # adopt another process's binding. A recycled pid or a missing start token on
+        # either side means we cannot prove same-process ownership -> not owned.
         if binding.server_pid != owner.server_pid:
             return False
         if binding.server_start_token is None or owner.server_start_token is None:
-            # Without a start token on either side we cannot prove same-process
-            # identity; treat as not-owned so the binding is reconciled, not adopted.
             return False
-        return binding.server_start_token == owner.server_start_token
+        if binding.server_start_token != owner.server_start_token:
+            return False
+        # Same live process. When both sides carry a generation token they must also
+        # agree; otherwise the binding is reconciled rather than adopted.
+        if binding.owner_generation is not None and owner.generation is not None:
+            return binding.owner_generation == owner.generation
+        return True
+
+
+@dataclass(frozen=True, slots=True)
+class AdmitHandoffResult:
+    """Outcome of admit-time handoff: whether the worker may claim durable work."""
+
+    report: HandoffReport | None
+    exit_code: int | None
+
+
+def _error_code(exc: Exception) -> str:
+    code = getattr(exc, "code", None)
+    value = getattr(code, "value", None)
+    if isinstance(value, str):
+        return value
+    if isinstance(code, str):
+        return code
+    return type(exc).__name__
+
+
+def reconcile_before_admit(
+    *,
+    reconciler: GenerationHandoffReconciler,
+    current_owner: OwnerIdentity,
+    audit: _AuditRecorder | None = None,
+    is_resumable: Callable[[str], bool] | None = None,
+) -> AdmitHandoffResult:
+    """Reconcile prior-generation bindings before this generation admits work (#275).
+
+    Emits a handoff audit event (success or fail-closed). When ``report.ok`` is False the
+    worker must exit with ``EXIT_HANDOFF_CONFLICT`` rather than claim queue items that a
+    surviving prior-generation worker may still be executing. When the reconciler itself
+    throws, the event records ``report=null`` with the typed error and admission still
+    fails closed -- no fabricated "ok" report is ever emitted.
+    """
+    try:
+        report = reconciler.reconcile(current_owner=current_owner, is_resumable=is_resumable)
+    except Exception as exc:
+        if audit is not None:
+            details: dict[str, Any] = {
+                "ok": False,
+                "report": None,
+                "error_code": _error_code(exc),
+                "error_type": type(exc).__name__,
+                "generation": current_owner.generation,
+                "server_pid": current_owner.server_pid,
+                "path": "admit",
+            }
+            with contextlib.suppress(Exception):
+                audit.record(HANDOFF_AUDIT_ACTION, success=False, details=details)
+        return AdmitHandoffResult(report=None, exit_code=EXIT_HANDOFF_CONFLICT)
+    if audit is not None:
+        details = {
+            **report.as_dict(),
+            "generation": current_owner.generation,
+            "server_pid": current_owner.server_pid,
+            "path": "admit",
+        }
+        with contextlib.suppress(Exception):
+            audit.record(HANDOFF_AUDIT_ACTION, success=report.ok, details=details)
+    if not report.ok:
+        return AdmitHandoffResult(report=report, exit_code=EXIT_HANDOFF_CONFLICT)
+    return AdmitHandoffResult(report=report, exit_code=None)

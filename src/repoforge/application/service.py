@@ -26,6 +26,7 @@ from .operations.cancel import OperationCancelCommand, OperationCancellationRequ
 from .operations.composite import OperationCommand, OperationCoordinator
 from .operations.list import OperationListCommand, OperationLister
 from .operations.recovery import reap_running_background
+from .operations.repair import OperationRepairCommand, OperationRepairService
 from .operations.status import OperationStatusCommand, OperationStatusReader
 from .operations.work_admission import DurableWorkAdmission
 from .read_batch import FileReadRequest
@@ -100,6 +101,7 @@ from .workspace.edit import (
     WorkspaceEditCommand,
     WorkspaceEditor,
 )
+from .workspace.exec import WorkspaceExecCommand, WorkspaceExecutor
 from .workspace.execute_plan import (
     WorkspaceExecutePlanCommand,
     WorkspacePlanExecutor,
@@ -376,6 +378,14 @@ class CodingService:
             ctx.reaper,
             request_live_cancel=self._request_live_operation_cancel,
         )
+        if ctx.operation_work_queue is None or ctx.worker_bindings is None or ctx.reaper is None:
+            raise RuntimeError("Operation repair dependencies are not configured")
+        self._operation_repair = OperationRepairService(
+            self.operations,
+            ctx.operation_work_queue,
+            ctx.worker_bindings,
+            ctx.reaper,
+        )
         self._repo_list = RepositoryLister(ctx)
         self._repo_status = RepositoryStatusReader(ctx)
         self._repo_context = RepositoryContextReader(ctx)
@@ -470,6 +480,12 @@ class CodingService:
             snapshot=self._snapshot,
             profile=self._profile,
             diagnostic=self._diagnostic,
+            adhoc=self._adhoc,
+            admission=self._work_admission,
+            operations=self.operations,
+        )
+        self._exec = WorkspaceExecutor(
+            ctx,
             adhoc=self._adhoc,
             admission=self._work_admission,
             operations=self.operations,
@@ -590,6 +606,23 @@ class CodingService:
         if result.cancellation_requested:
             self._request_live_operation_cancel(result.operation.kind, operation_id)
         return _result(result)
+
+    def operation_repair(
+        self,
+        action: str,
+        operation_id: str,
+        proposal_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Preview or apply an exact-state operator repair outside the MCP tool surface."""
+        return _result(
+            self._operation_repair.execute(
+                OperationRepairCommand(
+                    action=action,
+                    operation_id=operation_id,
+                    proposal_token=proposal_token,
+                )
+            )
+        )
 
     def failure_evidence_read(self, failure_id: str) -> dict[str, Any]:
         return _result(
@@ -1016,11 +1049,20 @@ class CodingService:
         idempotency_key: str | None = None,
         issue_ids: tuple[str, ...] = (),
         adopt_branch: str | None = None,
+        attach_branch: str | None = None,
+        attach_checkout_alias: str | None = None,
     ) -> dict[str, Any]:
         return _result(
             self._create.execute(
                 WorkspaceCreateCommand(
-                    repo_id, task_slug, base, idempotency_key, issue_ids, adopt_branch
+                    repo_id,
+                    task_slug,
+                    base,
+                    idempotency_key,
+                    issue_ids,
+                    adopt_branch,
+                    attach_branch,
+                    attach_checkout_alias,
                 )
             )
         )
@@ -1033,6 +1075,8 @@ class CodingService:
         idempotency_key: str | None = None,
         issue_ids: tuple[str, ...] = (),
         adopt_branch: str | None = None,
+        attach_branch: str | None = None,
+        attach_checkout_alias: str | None = None,
         auth_profile: str = "auto",
         actor_class: str = "human",
     ) -> dict[str, Any]:
@@ -1046,6 +1090,8 @@ class CodingService:
                     idempotency_key,
                     issue_ids,
                     adopt_branch,
+                    attach_branch,
+                    attach_checkout_alias,
                     selector,
                 )
             )
@@ -1283,6 +1329,7 @@ class CodingService:
         workspace_id: str,
         operations: list[WorkspaceMutation],
         expected_workspace_fingerprint: str,
+        expected_head_sha: str | None = None,
         dry_run: bool = False,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -1292,6 +1339,7 @@ class CodingService:
                     workspace_id,
                     tuple(operations),
                     expected_workspace_fingerprint,
+                    expected_head_sha,
                     dry_run,
                     idempotency_key,
                 )
@@ -1651,6 +1699,38 @@ class CodingService:
                 outcome="running",
                 head_sha=binding.head_sha if binding is not None else "",
                 workspace_fingerprint=binding.workspace_fingerprint if binding is not None else "",
+            )
+        )
+
+    def workspace_exec(
+        self,
+        workspace_id: str,
+        argv: tuple[str, ...] | None = None,
+        script: str | None = None,
+        shell: str | None = None,
+        argv_sequence: tuple[tuple[str, ...], ...] | None = None,
+        working_directory: str | None = None,
+        stdin_text: str | None = None,
+        expected_fingerprint: str | None = None,
+        expected_head_sha: str | None = None,
+        mutability: str = "read_only",
+        background: bool = False,
+    ) -> dict[str, Any]:
+        return _result(
+            self._exec.execute(
+                WorkspaceExecCommand(
+                    workspace_id=workspace_id,
+                    argv=argv,
+                    script=script,
+                    shell=shell,
+                    argv_sequence=argv_sequence,
+                    working_directory=working_directory,
+                    stdin_text=stdin_text,
+                    expected_fingerprint=expected_fingerprint,
+                    expected_head_sha=expected_head_sha,
+                    mutability=mutability,
+                    background=background,
+                )
             )
         )
 

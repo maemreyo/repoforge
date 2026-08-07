@@ -28,6 +28,8 @@ class WorkspaceCreateV2Command:
     idempotency_key: str | None = None
     issue_ids: tuple[str, ...] = ()
     adopt_branch: str | None = None
+    attach_branch: str | None = None
+    attach_checkout_alias: str | None = None
     selector: AuthProfileSelector = field(default_factory=AuthProfileSelector)
 
 
@@ -44,6 +46,7 @@ class WorkspaceCreateV2Result:
     workspace_fingerprint: str
     issue_ids: tuple[str, ...]
     adopted_branch: bool = False
+    attached: bool = False
     warnings: tuple[str, ...] = ()
 
 
@@ -62,13 +65,21 @@ class WorkspaceCreatorV2:
                 command.idempotency_key,
                 command.issue_ids,
                 command.adopt_branch,
+                command.attach_branch,
+                command.attach_checkout_alias,
                 command.selector,
             )
         )
         status = self._status.compute(WorkspaceStatusCommand(created.workspace_id))
+        if created.attached:
+            summary = f"Attached to operator-owned shared checkout {created.workspace_id}"
+        elif created.adopted_branch:
+            summary = f"Created worktree {created.workspace_id} on operator-owned branch"
+        else:
+            summary = f"Created isolated managed workspace {created.workspace_id}"
         return WorkspaceCreateV2Result(
             "ok",
-            f"Created isolated workspace {created.workspace_id}",
+            summary,
             None,
             created.workspace_id,
             created.repo_id,
@@ -78,6 +89,7 @@ class WorkspaceCreatorV2:
             status.workspace_fingerprint,
             created.issue_ids,
             created.adopted_branch,
+            created.attached,
             created.warnings,
         )
 
@@ -143,6 +155,7 @@ class WorkspaceSummaryV2:
     dirty: bool | None
     lifecycle: str
     issue_ids: tuple[str, ...]
+    kind: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +221,7 @@ class WorkspaceListerV2:
                         dirty,
                         lifecycle,
                         tuple(record.metadata.get("issue_ids", ())),
+                        record.kind.value,
                     )
                 )
                 if not exists:
@@ -283,6 +297,7 @@ class WorkspaceStatusV2Result:
     sections: tuple[StatusSectionV2, ...]
     fingerprint_source: str
     truncated: bool
+    kind: str
     read_consistency: ReadConsistency = LOCKED
 
 
@@ -455,6 +470,7 @@ class WorkspaceStatusV2:
                     bounded,
                     "cache" if lookup.source == "cache_hit" else "scan",
                     truncated,
+                    fresh_record.kind.value,
                     consistency,
                 )
 

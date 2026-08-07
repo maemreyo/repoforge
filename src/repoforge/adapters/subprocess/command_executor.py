@@ -571,7 +571,11 @@ class SubprocessCommandExecutor:
         bounded_stderr, stderr_truncated = self._truncate(stderr, limit)
         artifact_reference: str | None = None
         artifact_status = "not_applicable"
-        if returncode != 0:
+        # Persisted on failure regardless of size (unchanged), and now also whenever
+        # output was too large to inline even on success (#377 review): the excerpt
+        # alone would otherwise silently drop the middle of a long but successful run
+        # with no way to retrieve it.
+        if returncode != 0 or stdout_truncated or stderr_truncated:
             artifact_reference, artifact_status = self._persist_failure_output(stdout, stderr)
         result = CommandResult(
             argv=tuple(argv),

@@ -1912,9 +1912,17 @@ def build_application(
         config_generation=config_generation,
     )
     if context.publications is None:
+        reviewed_ssh_endpoints = tuple(
+            configured.transport.ssh_endpoint
+            for _profile_id, configured in sorted(config.auth_profiles.items())
+            if configured.eligibility.enabled and configured.transport.ssh_endpoint is not None
+        )
         publication_gateway = PublicationAdapter(
             commands=command,
-            repositories=DurableBindingPublicationRepositoryResolver(repository_bindings),
+            repositories=DurableBindingPublicationRepositoryResolver(
+                repository_bindings,
+                ssh_endpoints=reviewed_ssh_endpoints,
+            ),
             authorization=PinnedPublicationAuthorizationGateway(),
             capability_preflight=github_capability_preflight,
             transport=git_transport_router,
@@ -2138,6 +2146,12 @@ def run_execution_worker(config_path: Path, *, generation: int) -> int:
     import signal
     import threading
 
+    from .adapters.runtime.execution_worker import LEASE_ID_ENV, STATE_ROOT_ENV
+    from .application.activation.handoff import (
+        GenerationHandoffReconciler,
+        OwnerIdentity,
+        reconcile_before_admit,
+    )
     from .application.operations.work_executor import VerificationWorkHandlers
     from .application.operations.work_loop import OperationWorkLoop
     from .application.workspace.run_adhoc import WorkspaceAdhocRunner
@@ -2154,12 +2168,58 @@ def run_execution_worker(config_path: Path, *, generation: int) -> int:
     resolved_path = configs.resolved_path(generation)
     config = load_config(resolved_path)
     application = build_application(config, config_generation=generation)
+    ctx = application.context
+    worker_id = os.environ.get(LEASE_ID_ENV, "")
+    worker_binding_store = (
+        build_execution_worker_binding_store(
+            Path(os.environ.get(STATE_ROOT_ENV, "") or configs.root)
+        )
+        if worker_id
+        else None
+    )
+
+    def publish_worker_heartbeat(
+        state: str,
+        operation_id: str | None,
+        recovery_completed: bool,
+    ) -> None:
+        if worker_binding_store is None:
+            return
+        updated = worker_binding_store.update_heartbeat(
+            worker_id,
+            heartbeat_at=ctx.clock.now_iso(),
+            loop_state=state,
+            current_operation_id=operation_id,
+            recovery_completed=recovery_completed,
+        )
+        if updated is None:
+            raise ConfigError("Execution worker durable binding disappeared during heartbeat")
+
+    if ctx.worker_bindings is not None and ctx.reaper is not None:
+        server_pid = os.getpid()
+        admit = reconcile_before_admit(
+            reconciler=GenerationHandoffReconciler(bindings=ctx.worker_bindings, reaper=ctx.reaper),
+            current_owner=OwnerIdentity(
+                server_pid=server_pid,
+                server_start_token=ctx.reaper.read_start_token(server_pid),
+                generation=generation,
+            ),
+            audit=ctx.audit,
+        )
+        if admit.exit_code is not None:
+            return admit.exit_code
     handlers = VerificationWorkHandlers(
         WorkspaceProfileRunner(application.context),
         WorkspaceAdhocRunner(application.context),
         WorkspaceDiagnosticRunner(application.context),
     )
-    loop = OperationWorkLoop(application.context, application.operations, handlers)
+    loop = OperationWorkLoop(
+        application.context,
+        application.operations,
+        handlers,
+        owner_id=worker_id or None,
+        worker_heartbeat=publish_worker_heartbeat,
+    )
     stop = threading.Event()
     previous_handlers: dict[signal.Signals, object] = {}
 

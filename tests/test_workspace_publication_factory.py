@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,12 @@ from repoforge.application.workspace.publication_request_factory import (
 )
 from repoforge.domain.auth_profile import AuthProfileSelector, RequestedActorClass
 from repoforge.domain.errors import ErrorCode, RepoForgeError
+from repoforge.domain.git_remote_identity import (
+    ReviewedSshEndpoint,
+    SshAliasDefinition,
+    SshKeyProof,
+    SshPrincipalProof,
+)
 from repoforge.domain.git_transport_identity import (
     GitTransportAccess,
     GitTransportKind,
@@ -62,6 +69,50 @@ _CAPABILITY = "4" * 64
 _PERMISSION = "5" * 64
 _API_EVIDENCE = "6" * 64
 _TOKEN = "scoped-publication-token-canary"
+
+
+def _reviewed_ssh_endpoint() -> ReviewedSshEndpoint:
+    raw_url = "git@github-work:acme/widgets.git"
+    fingerprint = "SHA256:" + "A" * 43
+    alias = SshAliasDefinition(
+        alias="github-work",
+        canonical_host="github.com",
+        user="git",
+        port=22,
+        identity_file="/home/demo/.ssh/id_rsa_work",
+        source_config_digest="8" * 64,
+        selected_block_digest="9" * 64,
+    )
+    key = SshKeyProof(
+        canonical_path=alias.identity_file,
+        public_key_fingerprint=fingerprint,
+        owner_uid=501,
+        mode=0o600,
+        observed_at=_NOW,
+    )
+    principal = SshPrincipalProof(
+        provider_host=alias.canonical_host,
+        principal_kind="github_account",
+        principal_login="company-user",
+        expected_actor_id="user-42",
+        key_fingerprint=fingerprint,
+        observed_at=_NOW,
+        proof_digest="c" * 64,
+    )
+    return ReviewedSshEndpoint(
+        schema_version=1,
+        raw_host=alias.alias,
+        canonical_host=alias.canonical_host,
+        user=alias.user,
+        port=alias.port,
+        owner="acme",
+        repository="widgets",
+        raw_url_digest=hashlib.sha256(raw_url.encode()).hexdigest(),
+        alias=alias,
+        key=key,
+        principal=principal,
+        proof_digest="d" * 64,
+    )
 
 
 def _profile() -> CredentialProfile:
@@ -407,3 +458,30 @@ def test_durable_publication_resolver_accepts_only_the_exact_bound_url(
     with pytest.raises(RepoForgeError) as mismatch:
         resolver.resolve_url("https://github.com/personal/widgets.git")
     assert mismatch.value.code is ErrorCode.PUBLICATION_TARGET_MISMATCH
+
+
+def test_durable_publication_resolver_accepts_only_a_reviewed_ssh_alias(tmp_path: Path) -> None:
+    bindings = JsonRepositoryBindingStore(tmp_path, InMemoryLockManager())
+    bindings.create(
+        RepositoryIdentityBinding(
+            provider=RepositoryProvider.GITHUB,
+            provider_host="github.com",
+            repository_id="123456",
+            canonical_name="github.com/acme/widgets",
+            human_profile_id="company",
+            agent_profile_id=None,
+            config_revision=_CONFIG,
+        )
+    )
+    resolver = DurableBindingPublicationRepositoryResolver(
+        bindings,
+        ssh_endpoints=(_reviewed_ssh_endpoint(),),
+    )
+
+    resolved = resolver.resolve_url("git@github-work:acme/widgets.git")
+
+    assert resolved.repository_id == "123456"
+    assert resolved.canonical_name == "github.com/acme/widgets"
+    with pytest.raises(RepoForgeError) as unreviewed:
+        resolver.resolve_url("git@github-personal:acme/widgets.git")
+    assert unreviewed.value.code is ErrorCode.PUBLICATION_TARGET_MISMATCH

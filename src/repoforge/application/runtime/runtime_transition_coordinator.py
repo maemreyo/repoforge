@@ -256,8 +256,19 @@ class RuntimeTransitionCoordinator:
         A persisted terminal failure is terminal: an ACTIVATION_FAILED record is a
         completed outcome (a retry is a new transition), so it must never be listed
         here or recovery would loop on a record nothing can advance (F-009).
+
+        A truncated or unreadable scan cannot prove that every active transition
+        was observed, so recovery fails closed instead of returning a possibly
+        incomplete set.
         """
         page = self._transitions.list_all(max_records=max_records)
+        if page.scan_truncated or page.unreadable_record_ids:
+            raise ConfigError(
+                "RUNTIME_TRANSITION_SCAN_INCOMPLETE: the transition scan was "
+                "truncated or contained unreadable records, so the set of "
+                "non-terminal transitions cannot be proven; refusing to reconcile "
+                "on incomplete evidence"
+            )
         return tuple(
             item
             for item in page.records

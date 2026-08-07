@@ -287,6 +287,48 @@ def test_persist_worker_binding_records_child_group() -> None:
     assert stored.child_start_token == "tok-child"
 
 
+def test_persist_worker_binding_stamps_owner_generation() -> None:
+    """#275: the production binding site must stamp the active generation.
+
+    A worker binding without ``owner_generation`` is attributed only by process
+    identity, so a generation handoff cannot tell the new generation's bindings
+    apart from an old draining generation's. The ad-hoc runner binds a child on the
+    executor thread and must record the generation that owns the work.
+    """
+    bindings = InMemoryWorkerBindingStore()
+    reaper = RecordingProcessReaper(start_tokens={7777: "tok-child"})
+    runner = _adhoc_runner_with(
+        {"worker_bindings": bindings, "reaper": reaper, "config_generation": 7}
+    )
+
+    runner._persist_worker_binding("op-0000000000000000000000bb", 7777)
+
+    stored = bindings.get("op-0000000000000000000000bb")
+    assert stored is not None
+    assert stored.owner_generation == 7
+
+
+def test_profile_runner_binding_stamps_owner_generation() -> None:
+    """#275: the profile runner is a second production binding site and must also stamp."""
+    from repoforge.application.workspace.run_profile import WorkspaceProfileRunner
+
+    bindings = InMemoryWorkerBindingStore()
+    reaper = RecordingProcessReaper(start_tokens={7777: "tok-child"})
+    ctx = SimpleNamespace(
+        clock=FixedClock(),
+        worker_bindings=bindings,
+        reaper=reaper,
+        config_generation=9,
+    )
+    runner = WorkspaceProfileRunner(ctx)  # type: ignore[arg-type]
+
+    runner._persist_worker_binding("op-0000000000000000000000bb", 7777)
+
+    stored = bindings.get("op-0000000000000000000000bb")
+    assert stored is not None
+    assert stored.owner_generation == 9
+
+
 def test_cross_process_cancel_falls_back_to_reaper() -> None:
     bindings = InMemoryWorkerBindingStore()
     binding = _binding(operation_id="op-0000000000000000000000cc")

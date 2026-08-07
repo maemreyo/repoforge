@@ -124,7 +124,7 @@ def test_workspace_verify_plan_mode_drives_the_execution_plan_lifecycle(
 ) -> None:
     """The create/accept/execute execution-plan lifecycle is reachable through
     `workspace_verify(mode="plan", plan_action=...)` without a standalone tool (#180
-    keeps the static 28-tool surface; the legacy machinery is nested here instead)."""
+    keeps the static 29-tool surface; the legacy machinery is nested here instead)."""
     service, runner = _manual_service(forge_env)
     workspace_id = service.workspace_create("demo", "verify plan action")["workspace_id"]
     current = service.workspace_read_file(workspace_id, "hello.txt")
@@ -232,7 +232,7 @@ def test_plan_execution_failure_records_partial_receipt_and_stops_required_stage
 async def test_execution_plan_lifecycle_is_exposed_through_workspace_verify_plan_mode(
     forge_env: ForgeEnvironment,
 ) -> None:
-    """The static 28-tool Forge v2 surface has no standalone `workspace_execute_plan`
+    """The static 29-tool Forge v2 surface has no standalone `workspace_execute_plan`
     tool (#180); the create/accept/execute lifecycle is reachable only through
     `workspace_verify(mode="plan", plan_action=...)`."""
     service, runner = _manual_service(forge_env)

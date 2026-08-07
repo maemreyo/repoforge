@@ -2718,6 +2718,13 @@ def build_parser() -> argparse.ArgumentParser:
     operation_cancel = operation_sub.add_parser("cancel")
     operation_cancel.add_argument("operation_id")
     operation_cancel.add_argument("--expected-updated-at")
+    operation_repair = operation_sub.add_parser("repair")
+    operation_repair_sub = operation_repair.add_subparsers(dest="repair_command", required=True)
+    operation_repair_preview = operation_repair_sub.add_parser("preview")
+    operation_repair_preview.add_argument("operation_id")
+    operation_repair_apply = operation_repair_sub.add_parser("apply")
+    operation_repair_apply.add_argument("operation_id")
+    operation_repair_apply.add_argument("--proposal-token", required=True)
     tickets = commands.add_parser("tickets")
     tickets_sub = tickets.add_subparsers(dest="tickets_command", required=True)
     ticket_sync = tickets_sub.add_parser("sync")
@@ -2950,6 +2957,15 @@ def main(argv: list[str] | None = None) -> int:
                     service.operation_cancel(
                         args.operation_id,
                         expected_updated_at=args.expected_updated_at,
+                    )
+                )
+                return 0
+            if args.operation_command == "repair":
+                _json(
+                    service.operation_repair(
+                        args.repair_command,
+                        args.operation_id,
+                        proposal_token=getattr(args, "proposal_token", None),
                     )
                 )
                 return 0

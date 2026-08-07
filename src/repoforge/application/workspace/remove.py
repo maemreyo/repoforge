@@ -1,6 +1,7 @@
 from dataclasses import asdict, dataclass
 
 from ...domain.errors import WorkspaceError
+from ...domain.workspace import WorkspaceKind, WorkspaceRecord
 from ..context import ApplicationContext
 from ..idempotency import IdempotencyEffectBoundary
 from ..outcome_receipts import execute_with_outcome_receipt
@@ -26,7 +27,16 @@ class WorkspaceRemover:
         self.ctx = ctx
 
     def execute(self, c: WorkspaceRemoveCommand) -> WorkspaceRemoveResult:
-        record, repo, path = self.ctx.workspace(c.workspace_id)
+        # Loaded directly from the store, NOT via ctx.workspace(): that gateway also
+        # enforces ATTACH_CHECKOUT_REVOKED, which would make a revoked alias's workspace
+        # permanently unremovable -- the one call meant to clear a stale registry entry
+        # would itself be blocked by the very condition that makes the entry stale
+        # (review finding F-002). Kind alone decides which path below runs; nothing here
+        # needs the checkout to still be authorized, reachable, or even present.
+        record = self.ctx.store.load(c.workspace_id)
+        if record.kind is WorkspaceKind.ATTACHED_SHARED:
+            return self._detach_attached(c, record)
+        _, repo, path = self.ctx.workspace(c.workspace_id)
         audit_details = {
             "workspace_id": c.workspace_id,
             "delete_local_branch": c.delete_local_branch,
@@ -69,7 +79,7 @@ class WorkspaceRemover:
                 # This refusal deliberately runs BEFORE `boundary.begin()`: the boundary
                 # means "an effect may have happened", so opening it and then raising would
                 # write a receipt claiming a started effect for a call that touched nothing.
-                delete_branch = c.delete_local_branch and not record.metadata.get("adopted_branch")
+                delete_branch = c.delete_local_branch and record.kind.owns_branch_lifecycle
                 if c.delete_local_branch and not delete_branch:
                     raise WorkspaceError(
                         f"ADOPTED_BRANCH_NOT_DELETABLE: {record.branch!r} was adopted, not "
@@ -91,6 +101,53 @@ class WorkspaceRemover:
                 boundary.begin()
                 deleted = self.ctx.git.remove_worktree(repo, path, record.branch, delete_branch)
                 authoritative_result = WorkspaceRemoveResult(c.workspace_id, True, deleted)
+                boundary.record_result(authoritative_result)
+                self.ctx.store.delete(c.workspace_id)
+                return authoritative_result
+
+        return execute_with_outcome_receipt(
+            self.ctx,
+            "workspace_remove",
+            asdict(c),
+            op,
+            details=audit_details,
+            serialize=asdict,
+            effect_boundary=boundary,
+        )
+
+    def _detach_attached(
+        self, c: WorkspaceRemoveCommand, record: WorkspaceRecord
+    ) -> WorkspaceRemoveResult:
+        """An attached-shared workspace never had a RepoForge-created worktree to begin
+        with -- it operates directly on a checkout the operator already owns. Removal can
+        and must always be able to forget the registry entry (that bookkeeping is
+        RepoForge's own), but it must never call into git against a checkout it did not
+        create. Deliberately does not go through ctx.workspace(): a revoked or missing
+        checkout must still be detachable, since clearing the stale registry entry is
+        exactly the recovery action revocation is supposed to leave available."""
+        if c.delete_local_branch:
+            raise WorkspaceError(
+                f"ADOPTED_BRANCH_NOT_DELETABLE: {record.branch!r} belongs to the "
+                "operator's own checkout, not this workspace, so removal will not delete it",
+                safe_next_action=(
+                    "Re-run workspace_remove without delete_local_branch to detach the "
+                    "registry entry, or delete the branch yourself once you are done with it."
+                ),
+                unchanged_state=(
+                    "The checkout, its branch, and its git history were not modified.",
+                ),
+            )
+        audit_details = {
+            "workspace_id": c.workspace_id,
+            "delete_local_branch": c.delete_local_branch,
+            "detached": True,
+        }
+        boundary = IdempotencyEffectBoundary()
+
+        def op() -> WorkspaceRemoveResult:
+            with self.ctx.locks.lock(c.workspace_id):
+                boundary.begin()
+                authoritative_result = WorkspaceRemoveResult(c.workspace_id, True, False)
                 boundary.record_result(authoritative_result)
                 self.ctx.store.delete(c.workspace_id)
                 return authoritative_result

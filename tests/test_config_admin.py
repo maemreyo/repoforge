@@ -1838,6 +1838,51 @@ def test_repo_policy_can_propose_an_adhoc_runner(tmp_path: Path) -> None:
     assert applied["execution"]["adhoc_runners"] == ["uv", "bash"]
 
 
+def test_repo_policy_can_propose_an_adhoc_shell_runner(tmp_path: Path) -> None:
+    """Review finding: #377 threaded adhoc_shell_runners through config.py,
+    policy_patch.py, config-generation classification, and config_admin's own
+    canonicalization -- but never added it to the public v2 ExecutionPolicyDeclaration,
+    so the one reviewed path to enabling the shell form was still an operator
+    hand-editing config, exactly the gap adhoc_runners itself already had and was
+    already fixed for."""
+    admin = _admin(tmp_path)
+
+    preview = admin.repo_policy(
+        "demo",
+        action="preview",
+        execution={
+            "execution_mode": "relaxed",
+            "adhoc_runners": ["uv"],
+            "adhoc_shell_runners": ["sh", "bash"],
+        },
+    )
+
+    assert preview["result"] == "preview"
+    assert preview["execution"]["adhoc_shell_runners"] == ["sh", "bash"]
+
+    applied = admin.repo_policy(
+        "demo",
+        action="apply",
+        preview_token=preview["preview_token"],
+    )
+
+    assert applied["result"] == "pending_approval"
+    assert applied["execution"]["adhoc_shell_runners"] == ["sh", "bash"]
+
+
+def test_repo_policy_refuses_a_shell_runner_the_config_loader_would_reject(
+    tmp_path: Path,
+) -> None:
+    admin = _admin(tmp_path)
+
+    with pytest.raises(ConfigError, match="basename"):
+        admin.repo_policy(
+            "demo",
+            action="preview",
+            execution={"adhoc_shell_runners": ["/bin/sh"]},
+        )
+
+
 def test_repo_policy_refuses_a_runner_the_config_loader_would_reject(tmp_path: Path) -> None:
     """The surface must not accept a runner that `domain.adhoc` refuses later."""
     admin = _admin(tmp_path)

@@ -212,7 +212,7 @@ def test_pull_request_write_uses_only_exact_isolated_capability_probes() -> None
     assert executor.ambient_calls == []
     for call in executor.calls:
         assert call["cwd"] == _ROOT
-        assert call["environment"] == _auth().environment_dict()
+        assert call["environment"] == {"PATH": "/safe/bin", **_auth().environment_dict()}
         assert call["secrets"] == (_TOKEN,)
         assert call["check"] is False
 

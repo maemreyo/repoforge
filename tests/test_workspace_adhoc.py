@@ -19,7 +19,7 @@ from repoforge.application.workspace.run_adhoc import WorkspaceRunAdhocResult
 from repoforge.application.workspace.verify import _adhoc_evidence
 from repoforge.config import load_config
 from repoforge.contracts.v2 import AdhocEvidence
-from repoforge.domain.adhoc import MAX_ADHOC_STDIN_LENGTH
+from repoforge.domain.adhoc import MAX_ADHOC_ARGV_ELEMENTS, MAX_ADHOC_STDIN_LENGTH
 from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
 
 
@@ -55,6 +55,8 @@ def _adhoc_result(**overrides: object) -> WorkspaceRunAdhocResult:
         "stderr": "",
         "stdout_truncated": False,
         "stderr_truncated": False,
+        "output_artifact_reference": None,
+        "output_artifact_status": "not_applicable",
         "duration_ms": 1.0,
         "fingerprint_before": "a" * 64,
         "fingerprint_after": "b" * 64,
@@ -122,6 +124,48 @@ def test_adhoc_runners_rejects_duplicates(tmp_path: Path) -> None:
         create_forge_environment(
             tmp_path, execution_mode="relaxed", adhoc_runners=("python3", "python3")
         )
+
+
+def test_adhoc_shell_runners_defaults_empty(tmp_path: Path) -> None:
+    """A separate, narrower allowlist from adhoc_runners (#377): empty by default even
+    under execution_mode='relaxed' with a populated adhoc_runners -- enabling the
+    reviewed shell-script form is an explicit, distinct decision."""
+    env = _relaxed_env(tmp_path)
+    config = load_config(env.root / "config.toml")
+    repo = config.repositories["demo"]
+    assert repo.adhoc_runners == ("python3",)
+    assert repo.adhoc_shell_runners == ()
+
+
+def test_adhoc_shell_runners_rejects_invalid_basename(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="adhoc_shell_runners"):
+        create_forge_environment(
+            tmp_path,
+            execution_mode="relaxed",
+            adhoc_runners=("python3",),
+            adhoc_shell_runners=("/bin/sh",),
+        )
+
+
+def test_adhoc_shell_runners_rejects_duplicates(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="duplicate"):
+        create_forge_environment(
+            tmp_path,
+            execution_mode="relaxed",
+            adhoc_runners=("python3",),
+            adhoc_shell_runners=("sh", "sh"),
+        )
+
+
+def test_adhoc_shell_runners_loads_with_valid_allowlist(tmp_path: Path) -> None:
+    env = create_forge_environment(
+        tmp_path,
+        execution_mode="relaxed",
+        adhoc_runners=("python3",),
+        adhoc_shell_runners=("sh", "bash"),
+    )
+    config = load_config(env.root / "config.toml")
+    assert config.repositories["demo"].adhoc_shell_runners == ("sh", "bash")
 
 
 def test_relaxed_mode_loads_with_valid_allowlist(tmp_path: Path) -> None:
@@ -195,7 +239,7 @@ def test_argv_over_bound_is_rejected(tmp_path: Path) -> None:
     env = _relaxed_env(tmp_path)
     created = env.service.workspace_create("demo", "argv too long")
     workspace_id = created["workspace_id"]
-    argv = ["python3", *[f"--flag{i}" for i in range(40)]]
+    argv = ["python3", *[f"--flag{i}" for i in range(MAX_ADHOC_ARGV_ELEMENTS + 1)]]
     with pytest.raises(RepoForgeError) as exc:
         env.service.workspace_run_adhoc(workspace_id, argv)
     assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID
