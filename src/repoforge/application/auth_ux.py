@@ -30,6 +30,7 @@ from ..domain.git_transport_identity import GitTransportKind
 from ..domain.repository_identity import (
     RecoveryAction,
     RecoveryActionKind,
+    RepositoryAuthFailureCode,
     RepositoryIdentityBinding,
 )
 from ..domain.repository_identity_resolution import (
@@ -389,6 +390,26 @@ class AuthUxService:
                 eligibility,
                 expected=expected,
             )
+        # A binding that exists but pins an older configuration revision is recoverable: the
+        # repository identity, provider host, and both profile slots must be unchanged for this
+        # reconciliation to be only a revision refresh, not a permission change. That refresh
+        # must carry the reviewed binding revision, exactly like any other write.
+        if (
+            existing is not None
+            and resolution.outcome is RepositoryResolutionOutcome.FAILED
+            and resolution.failure is not None
+            and resolution.failure.code is RepositoryAuthFailureCode.BINDING_STALE
+            and self._config_revision_drift(existing.value, observation)
+            and resolution.binding_revision == existing.revision
+        ):
+            return self._reconcile_binding_revision(
+                repo_id,
+                existing,
+                observation,
+                selector,
+                eligibility,
+                expected=expected,
+            )
         failure = resolution.failure
         assert failure is not None
         raise _error(
@@ -402,6 +423,102 @@ class AuthUxService:
         return (
             binding.agent_profile_id if role is CredentialRole.AGENT else binding.human_profile_id
         )
+
+    @staticmethod
+    def _config_revision_drift(
+        binding: RepositoryIdentityBinding, observation: RepositoryIdentityObservation
+    ) -> bool:
+        return binding.config_revision != observation.config_revision
+
+    def _reconcile_binding_revision(
+        self,
+        repo_id: str,
+        existing: StateEnvelope[RepositoryIdentityBinding],
+        observation: RepositoryIdentityObservation,
+        selector: AuthProfileSelector,
+        eligibility: tuple[CredentialProfileEligibility, ...],
+        *,
+        expected: Revision | None,
+    ) -> dict[str, object]:
+        if expected is None:
+            raise _error(
+                ErrorCode.INPUT_REQUIRED,
+                (
+                    "The repository binding pins an older configuration revision. Refreshing it "
+                    "is a write, so the reviewed binding revision is required with "
+                    "--expected-revision."
+                ),
+                next_action="Re-read the binding revision with `rf auth resolve`, then retry.",
+            )
+        if existing.revision != expected:
+            raise _error(
+                ErrorCode.STATE_STALE,
+                "The repository binding revision changed after it was read.",
+                next_action="Re-read the binding with `rf auth resolve` and retry.",
+            )
+        binding = existing.value
+        # Only a config-revision refresh is allowed here. The repository identity and every
+        # role slot must have stayed unchanged, so this reconcile can never become a permission
+        # change, owner boundary move, or profile swap.
+        if (
+            binding.provider is not observation.provider
+            or binding.repository_id != observation.repository_id
+            or binding.provider_host != observation.provider_host
+            or binding.canonical_name != observation.canonical_name
+        ):
+            raise _error(
+                ErrorCode.CREDENTIAL_SCOPE_MISMATCH,
+                "The repository identity changed, so the config-revision reconcile cannot apply.",
+                next_action="Unbind and rebind the repository against the current identity.",
+            )
+        for profile_id, role in (
+            (binding.human_profile_id, CredentialRole.HUMAN),
+            (binding.agent_profile_id, CredentialRole.AGENT),
+        ):
+            if profile_id is None:
+                continue
+            if not self._profile_still_eligible(profile_id, role, observation, eligibility):
+                raise _error(
+                    ErrorCode.CREDENTIAL_SCOPE_MISMATCH,
+                    (
+                        f"The bound profile {profile_id!r} is no longer an eligible single "
+                        "selection for its role, so the config revision cannot be refreshed."
+                    ),
+                    next_action="Declare the intended profile with `--auth-profile`.",
+                )
+        updated = RepositoryIdentityBinding(
+            provider=binding.provider,
+            repository_id=binding.repository_id,
+            canonical_name=binding.canonical_name,
+            human_profile_id=binding.human_profile_id,
+            agent_profile_id=binding.agent_profile_id,
+            config_revision=observation.config_revision,
+            provider_host=binding.provider_host,
+        )
+        saved = self._bindings.save(updated, expected_revision=existing.revision)
+        return {
+            "status": "reconciled",
+            "repo_id": repo_id,
+            "binding": saved.value.payload(),
+            "revision": saved.revision.value,
+        }
+
+    def _profile_still_eligible(
+        self,
+        profile_id: str,
+        role: CredentialRole,
+        observation: RepositoryIdentityObservation,
+        eligibility: tuple[CredentialProfileEligibility, ...],
+    ) -> bool:
+        candidates = tuple(
+            item
+            for item in eligibility
+            if item.enabled
+            and item.profile.profile_id == profile_id
+            and item.matches(observation)
+            and _role_matches_eligibility(item, role)
+        )
+        return len(candidates) == 1
 
     def _fill_role_slot(
         self,

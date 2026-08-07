@@ -216,7 +216,7 @@ class FileSshKeyIdentity:
 
     def _fingerprint(self, material_path: Path) -> str:
         result = self._executor.run_isolated(
-            ["ssh-keygen", "-lf", "-E", "sha256", str(material_path)],
+            ["ssh-keygen", "-l", "-E", "sha256", "-f", str(material_path)],
             cwd=self._material_root,
             environment={"PATH": os.environ.get("PATH", "")},
             secrets=(),
