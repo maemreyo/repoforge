@@ -100,7 +100,7 @@ class RuntimeSupervisor:
         self,
         *,
         store: RuntimeStore,
-        restart_history: RestartHistoryStore,
+        restart_history: RestartHistoryStore | None = None,
         configs: ConfigurationStore,
         locks: LockManager,
         control: RuntimeControlServer,
@@ -426,6 +426,11 @@ class RuntimeSupervisor:
         no other way to learn this isn't just a stale `healthy`/`degraded` snapshot.
         """
         try:
+            if self._restart_history is None:
+                # A caller that composes no restart-history store (tests that only
+                # exercise worker liveness) cannot record an increment; the restart
+                # counter simply carries no durable evidence in that composition.
+                return None
             return self._restart_history.record_restart(
                 incarnation_id=incarnation_id,
                 reason=reason,
@@ -966,7 +971,9 @@ class RuntimeSupervisor:
             # that has nothing to do with restart history (#448 Slice 4; the incident this
             # ledger fixes: a fresh incarnation reported `restarts_total: 0`,
             # `last_restart_at: null` despite real prior restarts).
-            prior_history = self._restart_history.read()
+            prior_history = (
+                self._restart_history.read() if self._restart_history is not None else None
+            )
             if prior_history is None:
                 # Migration (#448 Slice 4): this release may be the first to run since
                 # the ledger existed at all, while `self._store`'s file can still carry
@@ -975,8 +982,12 @@ class RuntimeSupervisor:
                 # discard it) beats silently starting over at a false `0`.
                 # `seed_if_missing` itself re-checks the ledger under its own lock, so
                 # two incarnations racing to seed for the first time cannot disagree.
-                legacy_evidence = self._store.peek_restart_evidence()
-                if legacy_evidence is not None:
+                legacy_evidence = (
+                    self._store.peek_restart_evidence()
+                    if self._restart_history is not None
+                    else None
+                )
+                if legacy_evidence is not None and self._restart_history is not None:
                     legacy_total, legacy_last_restart_at = legacy_evidence
                     prior_history = self._restart_history.seed_if_missing(
                         restarts_total=legacy_total,
