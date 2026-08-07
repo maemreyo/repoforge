@@ -40,7 +40,11 @@ from .adapters.code_intelligence import (
     SyntaxCodeIntelligenceProvider,
     TreeSitterCodeIntelligenceProvider,
 )
-from .adapters.codegraph import build_codegraph_runtime
+from .adapters.codegraph import (
+    build_codegraph_runtime,
+    codegraph_doctor_checks,
+    codegraph_operator_report,
+)
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
@@ -444,6 +448,24 @@ def build_repository_probe(state_root: Path | None = None) -> RepositoryProbe:
     root = (state_root or default_state_root()).expanduser().resolve()
     server = ServerConfig(root / "probe-workspaces", root)
     return LocalRepositoryProbe(SubprocessCommandExecutor(server))
+
+
+def build_code_intelligence_operator_report(
+    config: AppConfig,
+    registry: ProviderRegistry,
+) -> dict[str, object]:
+    """Project provider-specific operator state through the composition root."""
+
+    return codegraph_operator_report(config, registry)
+
+
+def build_code_intelligence_doctor_checks(
+    config: AppConfig,
+    registry: ProviderRegistry,
+) -> tuple[dict[str, object], ...]:
+    """Return secret-free provider checks without leaking adapter types to interfaces."""
+
+    return tuple(check.as_dict() for check in codegraph_doctor_checks(config, registry))
 
 
 def build_onboarding_store(

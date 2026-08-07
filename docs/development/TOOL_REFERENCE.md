@@ -174,6 +174,33 @@ Diagnostic failures publish up to 100 complete structured pytest node IDs even w
 
 Only a successful verification-enabled profile on the exact current fingerprint satisfies the commit gate. A low-confidence or unavailable code-intelligence provider broadens verification; it never narrows a safety gate.
 
+#### Optional managed CodeGraph augmentation
+
+CodeGraph does not add a 29th MCP tool. It is an internal, per-repository semantic provider behind
+the existing assessment and `workspace_verify` routes, so the public roster remains exactly 28.
+When disabled, RepoForge constructs the same Tree-sitter → syntax baseline object it used before
+CodeGraph support. When enabled, CodeGraph may add normalized caller/callee, impact and affected-test
+evidence to that baseline; it cannot replace baseline facts or silently lower their limitations.
+
+Enrollment is a reviewed immutable provider manifest plus a repository
+`code_intelligence_provider_id`. The executable version and SHA-256, provider manifest, options,
+adapter schema and canary corpus are identity-bound. Commands are one-shot, network-free, bounded
+and run with daemon, download, update-check and telemetry behavior disabled. All projections,
+indexes, promotion receipts and canary files are private state under
+`<state_root>/providers/codegraph/`; no worktree `.codegraph` directory is created, inspected or
+owned by RepoForge.
+
+Before semantic evidence is considered promoted, deterministic clean and incremental canaries must
+pass and produce a matching receipt. Missing, stale, corrupt, partial, truncated, ambiguous or
+below-threshold evidence preserves the baseline and forces conservative verification widening.
+`mode = "auto"` refuses graph-derived targeting whenever semantic evidence is uncertain.
+
+Operator visibility remains outside MCP: `rf show-config` publishes only repository/provider IDs,
+reviewed version, identity digests, executable availability state and receipt validity; `rf doctor`
+adds separate executable, version and receipt checks. Absolute executable paths, environment
+values, provider stdout/stderr and provider-private error text are not returned. Rollback is a
+reviewed generation that clears the repository provider ID, restoring exact baseline composition.
+
 Execution-capable results expose `execution_evidence`. Requested network/filesystem values describe reviewed intent; effective values and the per-control enforcement assessment describe actual backend behavior. The native backend normally reports host-inherited network and host-account filesystem access with advisory enforcement, even when the request is offline or workspace-scoped. Unsupported CPU, memory, disk, subprocess-count, and network-byte controls are never presented as enforced. Treat `execution_evidence` as authoritative over legacy policy labels.
 
 Verification receipts bind environment identity plus requested/effective policy hashes. Immediately before commit, RepoForge recompiles the same profile request and re-inspects the current backend. A PATH, toolchain, adapter, effective-policy, or configuration change makes the receipt stale; run one fresh authoritative profile on the exact tree to recover.

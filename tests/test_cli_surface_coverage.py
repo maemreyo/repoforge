@@ -76,6 +76,7 @@ class FakeStore:
 
 class FakeService:
     config = SimpleNamespace(source_path=Path("/config"))
+    application = SimpleNamespace(context=SimpleNamespace(provider_registry=object()))
     audit: Any = None
     metrics: Any = None
 
@@ -167,6 +168,17 @@ def test_main_dispatches_all_command_families(
     )
     monkeypatch.setattr(cli, "load_config", lambda path: object())
     monkeypatch.setattr(cli, "CodingService", lambda config: _fake_service_with_audit(tmp_path))
+    monkeypatch.setattr(
+        cli,
+        "build_code_intelligence_operator_report",
+        lambda config, registry: {
+            "enabled": False,
+            "baseline_when_disabled": True,
+            "providers": [],
+            "repositories": [{"repo_id": "demo", "code_intelligence_provider_id": ""}],
+        },
+    )
+    monkeypatch.setattr(cli, "build_code_intelligence_doctor_checks", lambda config, registry: ())
     monkeypatch.setattr(cli, "system_clock", lambda: SimpleNamespace(now_iso=lambda: "now"))
 
     called: list[str] = []
@@ -230,7 +242,11 @@ def test_main_dispatches_all_command_families(
     assert "runtime log content" in bundle["exclusions"]
     capsys.readouterr()
     assert cli.main(["--config", config, "show-config"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["code_intelligence"]["baseline_when_disabled"] is True
     assert cli.main(["--config", config, "doctor"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["summary"]["total"] == len(doctor["checks"])
     assert cli.main(["--config", config, "list-workspaces"]) == 0
 
     capsys.readouterr()

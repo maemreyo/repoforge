@@ -34,6 +34,7 @@ from .normalize import (
     normalize_relationships,
     normalize_status,
 )
+from .operator import CodeGraphDoctorCheck, codegraph_doctor_checks, codegraph_operator_report
 from .projection import CodeGraphProjection
 from .provider import ManagedCodeGraphProvider
 from .receipts import (
@@ -42,6 +43,7 @@ from .receipts import (
     PromotionReceipt,
     PromotionReceiptStore,
     promotion_identity,
+    promotion_receipt_valid,
 )
 
 __all__ = [
@@ -52,6 +54,7 @@ __all__ = [
     "CodeGraphCleanupResult",
     "CodeGraphCommandOutput",
     "CodeGraphCommandRunner",
+    "CodeGraphDoctorCheck",
     "CodeGraphLifecycle",
     "CodeGraphOptions",
     "CodeGraphProjection",
@@ -76,6 +79,8 @@ __all__ = [
     "build_codegraph_runtime",
     "build_repository_code_intelligence",
     "canary_corpus_digest",
+    "codegraph_doctor_checks",
+    "codegraph_operator_report",
     "codegraph_options_from_config",
     "normalize_affected",
     "normalize_impact",
@@ -83,4 +88,5 @@ __all__ = [
     "normalize_relationships",
     "normalize_status",
     "promotion_identity",
+    "promotion_receipt_valid",
 ]

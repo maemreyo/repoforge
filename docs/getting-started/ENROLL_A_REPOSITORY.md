@@ -144,6 +144,82 @@ When the runtime restarts during activation (the activation may be classified as
 or removes tools. ChatGPT-side connectors only need a reconnect/rediscovery when the client
 caches tool results or dropped the connection during the restart.
 
+## Optional: enable managed CodeGraph semantic intelligence
+
+CodeGraph is not enabled by repository discovery, proposal, `rf setup`, or `rf repo add`. A newly
+resolved repository explicitly carries `code_intelligence_provider_id = ""`, which preserves the
+exact Tree-sitter → syntax baseline composition. Enabling CodeGraph is a separate reviewed
+configuration-generation change: enroll one pinned provider manifest, then set the selected
+repository's `code_intelligence_provider_id` to that provider ID.
+
+A reviewed enrollment has this shape in the immutable resolved configuration:
+
+```toml
+[[providers]]
+provider_id = "codegraph"
+kind = "analyzer"
+version = "1.5.0"
+executable = "/opt/repoforge/providers/codegraph"
+executable_digest = "<lowercase-sha256>"
+supported_languages = ["python", "javascript", "typescript"]
+supported_capabilities = ["semantic_graph"]
+network_policy = "none"
+
+[providers.filesystem]
+capability = "managed_state_write"
+allowed_paths = []
+
+[providers.codegraph]
+init_timeout_seconds = 60
+sync_timeout_seconds = 120
+query_timeout_seconds = 30
+max_changed_paths = 200
+max_relationships = 200
+max_affected_paths = 200
+max_depth = 4
+projection_max_files = 20000
+projection_max_bytes = 268435456
+canary_timeout_seconds = 120
+
+[repositories.<id>]
+code_intelligence_provider_id = "codegraph"
+```
+
+RepoForge verifies the executable digest before every semantic command and requires the exact
+pinned version. It launches one-shot commands with no inherited provider environment and with
+`CODEGRAPH_NO_DAEMON=1`, `CODEGRAPH_NO_DOWNLOAD=1`, update checks and telemetry disabled. It does
+not start a shared daemon, watcher or MCP server, does not download a runtime, and does not add an
+MCP tool.
+
+Provider-owned files remain outside every Git worktree:
+
+```text
+<state_root>/providers/codegraph/workspaces/<workspace_id>/
+<state_root>/providers/codegraph/promotion/<promotion-identity>.json
+<state_root>/providers/codegraph/canary-corpus/<promotion-identity>/
+```
+
+The promotion identity hashes the executable digest and version, host platform and architecture,
+provider-manifest hash, CodeGraph options digest, adapter schema version and embedded canary-corpus
+digest. A successful receipt is reusable only for that exact identity. Changing any field forces a
+new bounded canary run; corrupt, missing or symlinked receipt state is treated as absent.
+
+`rf show-config` reports repository enrollment, provider/version identity, manifest/options/
+executable digests, executable availability and promotion-receipt validity. `rf doctor` reports
+separate executable, reviewed-version and promotion-receipt checks. Neither command returns the
+resolved executable path, environment variables, raw provider output or provider-private errors.
+
+Graph evidence is additive. When it is unavailable, below threshold, partial, truncated, stale,
+ambiguous or canary-unpromoted, RepoForge retains the baseline facts and widens verification.
+Automatic targeted verification is refused under semantic uncertainty; CodeGraph can never reduce
+a safety gate merely because it returned a candidate set.
+
+Rollback does not require deleting files in a repository. Set
+`repositories.<id>.code_intelligence_provider_id = ""` (or remove that field), accept and activate
+a new reviewed generation, and the exact baseline provider construction returns. Workspace removal
+and bounded startup cleanup delete only provider-owned state under `<state_root>`; RepoForge never
+inspects or deletes a user-created `.codegraph` directory in the source clone or worktree.
+
 ## Troubleshooting and known constraints
 
 - **A proposed profile differs from CI's package manager.** The profile detector prefers

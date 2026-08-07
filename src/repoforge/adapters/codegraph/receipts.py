@@ -249,6 +249,20 @@ class PromotionReceiptStore:
             atomic_write_text(path, payload)
 
 
+def promotion_receipt_valid(state_root: Path, identity: PromotionIdentity) -> bool:
+    root = state_root.expanduser().resolve() / "providers" / "codegraph" / "promotion"
+    path = root / f"{identity.digest}.json"
+    try:
+        if root.is_symlink() or not root.is_dir():
+            return False
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_RECEIPT_BYTES:
+            return False
+        raw = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_pairs)
+        return _parse_receipt(raw, identity).passed
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
 def promotion_identity(
     manifest: ProviderManifest,
     corpus_digest: str,
@@ -277,4 +291,5 @@ __all__ = [
     "PromotionReceipt",
     "PromotionReceiptStore",
     "promotion_identity",
+    "promotion_receipt_valid",
 ]

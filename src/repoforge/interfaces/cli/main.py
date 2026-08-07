@@ -77,6 +77,8 @@ from ...bootstrap import (
     build_approval_payload_store,
     build_approval_store,
     build_auth_command_dependencies,
+    build_code_intelligence_doctor_checks,
+    build_code_intelligence_operator_report,
     build_configuration_store,
     build_dev_runtime_service,
     build_execution_worker_binding_store,
@@ -2970,11 +2972,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 0
         if args.command == "show-config":
+            registry = service.application.context.provider_registry
+            if registry is None:
+                raise ConfigError("Provider registry is unavailable")
             payload = service.repo_list() | {
                 "source": str(config_path),
                 "generation": active_generation.generation
                 if (active_generation := store.active())
                 else None,
+                "code_intelligence": build_code_intelligence_operator_report(config, registry),
             }
             if args.origin:
                 payload["origins"] = _config_origins(store)
@@ -2983,6 +2989,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             result = service.doctor()
             result["paths"] = _resolved_paths(config_path)
+            registry = service.application.context.provider_registry
+            if registry is None:
+                raise ConfigError("Provider registry is unavailable")
+            for item in build_code_intelligence_doctor_checks(config, registry):
+                result["checks"].append(item)
+                if item.get("ok") is False and item.get("severity") == "error":
+                    result["ok"] = False
             report = _doctor_contract_identity_report(args)
             if report is not None:
                 result["runtime_contract_identity"] = report.as_dict()
@@ -3027,6 +3040,24 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if not worker_ok:
                     result["ok"] = False
+            checks = result.get("checks")
+            if isinstance(checks, list):
+                result["summary"] = {
+                    "passed": sum(
+                        item.get("ok") is True for item in checks if isinstance(item, dict)
+                    ),
+                    "errors": sum(
+                        item.get("ok") is not True and item.get("severity") == "error"
+                        for item in checks
+                        if isinstance(item, dict)
+                    ),
+                    "warnings": sum(
+                        item.get("ok") is not True and item.get("severity") == "warning"
+                        for item in checks
+                        if isinstance(item, dict)
+                    ),
+                    "total": sum(isinstance(item, dict) for item in checks),
+                }
             _json(result)
             return 0 if result["ok"] else 1
         if args.command == "list-workspaces":

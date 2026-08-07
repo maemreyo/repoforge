@@ -110,6 +110,7 @@ def apply_proposal(document: dict[str, Any], proposal: RepositoryProposal) -> di
         "pr_labels": [],
         "pr_reviewers": [],
         "no_maintainer_edit": False,
+        "code_intelligence_provider_id": "",
         "profiles": profile_map,
     }
     if default_profile:

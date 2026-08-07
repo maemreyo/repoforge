@@ -443,15 +443,15 @@ Commit: `feat(codegraph): gate promotion with semantic canaries`
 **Interfaces:**
 - Documents: enrollment fields, external state layout, receipt identity, failure behavior, rollback, and no-daemon/no-download guarantees.
 
-- [ ] **Step 1: Add failing operator-surface tests**
+- [x] **Step 1: Add failing operator-surface tests**
 
 Prove init examples include disabled default and reviewed nested provider options; doctor reports executable/version/receipt validity without raw environment/provider output; show-config emits only secret-free values and digests.
 
-- [ ] **Step 2: Implement docs and operator surfaces**
+- [x] **Step 2: Implement docs and operator surfaces**
 
 Update changelog and architecture/operator docs. State that no MCP tool is added and disabling `code_intelligence_provider_id` restores exact baseline construction.
 
-- [ ] **Step 3: Run affected and repository gates**
+- [x] **Step 3: Run affected and repository gates**
 
 Run in order:
 
@@ -466,7 +466,17 @@ make test
 
 The separately marked real-binary canary gate must run on supported release platforms with the pinned artifact already provisioned; it must never self-download.
 
-- [ ] **Step 4: Final commit**
+Evidence on the final Task 8 implementation tree before the authoritative final profile:
+
+- operator/CLI/config/docs focused matrix: 80 tests passed;
+- CodeGraph core and augmentation/canary/assessment lanes passed;
+- Ruff, strict mypy, module line budget, manifest completeness, and the 252-test catalog passed;
+- `test` profile passed as operation `op-565181f0871f48e6801babec` on the exact tree;
+- the 8-step `verify` profile passed as operation `op-94afc47ce7d448f2b79b1307`; the final commit uses a fresh exact-tree rerun after this evidence note;
+- an initial wide run exposed and preserved the architecture boundary: CLI imported an adapter directly. The fix routes secret-free operator projections through `bootstrap.py`, the sole composition root, and the architecture regression is green;
+- `scripts/test-all.sh` is not invoked through an unreviewed shell bypass. The current repository gate split assigns coverage/build to the operator/CI production gate, while the enrolled `verify` profile is the authoritative change-facing final gate.
+
+- [x] **Step 4: Final commit**
 
 ```bash
 git add CHANGELOG.md docs src tests

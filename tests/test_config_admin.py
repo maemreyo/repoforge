@@ -402,7 +402,9 @@ def _proposal(root: Path) -> Any:
 def test_apply_policy_patch_sets_and_removes_entries(tmp_path: Path) -> None:
     proposal = _proposal(tmp_path / "demo")
     document = apply_proposal(parse_resolved(None), proposal)
-    profiles = document["repositories"]["demo"]["profiles"]
+    repository = document["repositories"]["demo"]
+    assert repository["code_intelligence_provider_id"] == ""
+    profiles = repository["profiles"]
     assert "full" in profiles
     patch = RepositoryPolicyPatch(
         profiles=(ProfilePatch("debug", "One-off", (("pnpm", "run", "lint"),)),),
