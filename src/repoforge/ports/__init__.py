@@ -128,6 +128,7 @@ from .repository_discovery import DiscoveryRequest, RepositoryDiscovery
 from .repository_probe import RepositoryProbe
 from .runtime_activation_store import RuntimeActivationStore
 from .runtime_control import (
+    RestartHistoryStore,
     RuntimeControlClient,
     RuntimeControlServer,
     RuntimeLauncher,
@@ -270,6 +271,7 @@ __all__ = [
     "RepositoryDiscovery",
     "RepositoryProbe",
     "ResolvedRepositoryRef",
+    "RestartHistoryStore",
     "RestartOutcome",
     "RuntimeActivationStore",
     "RuntimeControlClient",

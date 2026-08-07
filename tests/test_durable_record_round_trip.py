@@ -183,6 +183,33 @@ def _runtime_record(tmp_path: Path) -> tuple[object, object]:
         restarts_total=3,
         last_restart_at="2026-07-29T09:26:21+00:00",
         fail_closed_since="2026-07-29T09:26:21+00:00",
+        incarnation_id="f" * 24,
+        restart_history_provenance="durable",
+    )
+    store.write(written)
+    return written, store.read()
+
+
+def _restart_history_record(tmp_path: Path) -> tuple[object, object]:
+    """The durable restart-history ledger (#448 Slice 4).
+
+    Deliberately a separate file/store from `RuntimeRecord`: it is never subject to
+    that record's pid-liveness self-heal, which is what makes it safe to carry restart
+    counters across a process replacement that self-heal would otherwise discard.
+    """
+    from repoforge.adapters.runtime.state_store import JsonRestartHistoryStore
+    from repoforge.domain.runtime import RestartHistoryRecord
+
+    store = JsonRestartHistoryStore(tmp_path / "managed-runtime-restart-history-v1.json")
+    written = RestartHistoryRecord(
+        protocol_version=1,
+        restarts_total=4,
+        last_restart_at="2026-07-29T09:26:21+00:00",
+        incarnation_id="f" * 24,
+        updated_at="2026-07-29T09:39:48+00:00",
+        last_event_id="f" * 24 + ":4",
+        last_restart_reason="watchdog observed a live but unhealthy tunnel child",
+        provenance="legacy_runtime_record",
     )
     store.write(written)
     return written, store.read()
@@ -1133,7 +1160,7 @@ def _register() -> tuple[RoundTripCase, ...]:
     from repoforge.domain.operation_worker import OperationWorkerBinding
     from repoforge.domain.process_lease import ProcessLease
     from repoforge.domain.repository_identity import RepositoryIdentityBinding
-    from repoforge.domain.runtime import RuntimeRecord
+    from repoforge.domain.runtime import RestartHistoryRecord, RuntimeRecord
     from repoforge.domain.runtime_activation import RuntimeActivationReceipt
     from repoforge.domain.runtime_transition import RuntimeTransition
     from repoforge.domain.task_capsule import TaskCapsule
@@ -1141,6 +1168,7 @@ def _register() -> tuple[RoundTripCase, ...]:
 
     return (
         RoundTripCase(RuntimeRecord, _runtime_record),
+        RoundTripCase(RestartHistoryRecord, _restart_history_record),
         RoundTripCase(OperationWorkerBinding, _worker_binding),
         RoundTripCase(ProcessLease, _process_lease),
         RoundTripCase(RuntimeTransition, _runtime_transition),
@@ -1274,7 +1302,10 @@ def _codec_backed_record_types() -> dict[type, str]:
 #: Durable record types whose store decodes by hand instead of through a `StateCodec`.
 #: These carry *more* drift risk, not less -- the decoder enumerates every field, so a
 #: field added anywhere else is simply absent from it, which is exactly what #338 was.
-HAND_DECODED_RECORD_TYPES: tuple[str, ...] = ("repoforge.domain.runtime.RuntimeRecord",)
+HAND_DECODED_RECORD_TYPES: tuple[str, ...] = (
+    "repoforge.domain.runtime.RuntimeRecord",
+    "repoforge.domain.runtime.RestartHistoryRecord",
+)
 
 
 def test_every_durable_record_type_has_a_round_trip_case() -> None:

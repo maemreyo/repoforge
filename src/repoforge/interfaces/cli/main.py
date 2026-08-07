@@ -1423,6 +1423,8 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
     persisted_state = record.phase.value if record else "stopped"
     observed_state = persisted_state
     observed_health: list[object] = list(record.health) if record else []
+    health_age_seconds: float | None = None
+    health_freshness: str | None = None
     probe: dict[str, object] = {
         "attempted": False,
         "ok": record is None or record.phase is RuntimePhase.STOPPED,
@@ -1441,8 +1443,18 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
             raw_health = response_payload.get("health")
             if isinstance(raw_health, (list, tuple)):
                 observed_health = list(raw_health)
+            raw_age = response_payload.get("health_age_seconds")
+            health_age_seconds = raw_age if isinstance(raw_age, (int, float)) else None
+            raw_freshness = response_payload.get("health_freshness")
+            health_freshness = raw_freshness if isinstance(raw_freshness, str) else None
             observed_state = (
-                "healthy" if response.ok and response.status == "healthy" else "unhealthy"
+                "healthy"
+                if response.ok and response.status == "healthy"
+                # `status == "unknown"` is the control socket's own honest answer for a
+                # missing or stale health snapshot (#448 Signature C) -- surfaced as
+                # "stale" here rather than collapsed into "unhealthy", which would claim
+                # a definite bad observation that was never actually made.
+                else ("stale" if response.status == "unknown" else "unhealthy")
             )
             probe = {
                 "attempted": True,
@@ -1501,6 +1513,8 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
         "active_generation": record.active_generation if record else None,
         "health": observed_health,
         "health_observed_at": record.health_observed_at if record else None,
+        "health_age_seconds": health_age_seconds,
+        "health_freshness": health_freshness,
         "consecutive_health_failures": record.consecutive_health_failures if record else 0,
         "tunnel_profile": record.tunnel_profile if record else None,
         "tunnel_profile_fingerprint": record.tunnel_profile_fingerprint if record else None,
@@ -1508,6 +1522,18 @@ def _runtime_status(store: ConfigurationStore) -> dict[str, object]:
         "plugin_rediscovery_recommended": health["client_rediscovery_recommended"],
         "plugin_rediscovery_reason": health["rediscovery_reason"],
         "restart_count": record.restart_count if record else 0,
+        # `restarts_total`/`last_restart_at` are evidence, never reset for the life of the
+        # record (unlike `restart_count` above); `restart_history_provenance` distinguishes
+        # "verified zero restarts" from "the durable ledger predates this build or was
+        # otherwise unavailable" -- a bare `0` alone cannot say which (#448 Slice 4).
+        "restarts_total": record.restarts_total if record else 0,
+        "last_restart_at": record.last_restart_at if record else None,
+        "restart_history_provenance": record.restart_history_provenance if record else "unknown",
+        # A fresh, non-reused identifier for the current supervisor process lifetime --
+        # distinct from `correlation_id` below, which is also reused per-request in the
+        # control protocol and is therefore unsuitable as a lifecycle identifier on its
+        # own (#448 Slice 4).
+        "incarnation_id": record.incarnation_id if record else None,
         "last_error_code": record.last_error_code if record else None,
         "last_error": record.last_error if record else None,
         "correlation_id": record.correlation_id if record else None,
@@ -1917,9 +1943,13 @@ def _upgrade_command(args: argparse.Namespace) -> int:
     if getattr(args, "upgrade_command", None) == "reconcile":
         result = service.reconcile(repair=getattr(args, "repair", None))
         _json(result.as_dict())
-        # A reconciled or repaired activation is terminal; a repair rollback that did
-        # not converge raises rather than silently exiting 0.
-        return 0 if result.status in {"reconciled", "rolled_back", "nothing_to_reconcile"} else 1
+        # A reconciled or repaired activation is terminal; a repair rollback (or
+        # recover) that did not converge raises rather than silently exiting 0.
+        return (
+            0
+            if result.status in {"reconciled", "rolled_back", "recovered", "nothing_to_reconcile"}
+            else 1
+        )
     if getattr(args, "upgrade_command", None) == "rollback":
         receipt = args.receipt
         if receipt is not None:
@@ -2583,11 +2613,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     ).add_argument(
         "--repair",
-        choices=["rollback"],
+        choices=["rollback", "recover"],
         help=(
             "Repair a fail-closed activation by rolling `current` back to the previous "
-            "release after verifying the typed failure and that the target is usable. "
-            "Never the default."
+            "release after verifying the typed failure and that the target is usable "
+            "(rollback), or promote a candidate that received a terminal FAILED "
+            "activation receipt but is now independently re-verified as durably "
+            "serving -- writes a new, distinct ACTIVATED receipt linked to the FAILED "
+            "one, never edits the original (recover). Never the default."
         ),
     )
     dev_runtime = commands.add_parser("dev-runtime")

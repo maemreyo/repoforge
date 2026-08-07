@@ -201,6 +201,18 @@ class RuntimeRecord:
     # of re-probing and re-spawning, so a deterministic failure is never reset by a
     # fresh lifetime. Cleared when a different release's supervisor writes a new record.
     fail_closed_since: str | None = None
+    # A fresh, non-reused identifier generated once per supervisor process lifetime
+    # (#448 Slice 4) -- distinct from `correlation_id`, which is ALSO reused per-request
+    # in `ControlRequest`/`ControlResponse` and is therefore unsuitable as a lifecycle
+    # identifier on its own. `None` only for records written before this field existed.
+    incarnation_id: str | None = None
+    # Whether `restarts_total`/`last_restart_at` above reflect real accumulated history
+    # from the durable restart-history ledger ("durable"), or this process could not
+    # find one -- a fresh install, or an upgrade from before the ledger existed
+    # ("unknown"). Deliberately distinct from a bare `0`: an operator reading
+    # `restarts_total: 0` needs to know whether that means "verified zero restarts" or
+    # "history predates this build and was never counted" (#448 Slice 4).
+    restart_history_provenance: str = "unknown"
 
     def __post_init__(self) -> None:
         if (
@@ -231,6 +243,10 @@ class RuntimeRecord:
             not self.fail_closed_since or len(self.fail_closed_since) > 64
         ):
             raise ValueError("Runtime fail_closed_since is invalid")
+        if self.incarnation_id is not None and not self.incarnation_id:
+            raise ValueError("Runtime incarnation_id cannot be empty")
+        if self.restart_history_provenance not in ("unknown", "durable"):
+            raise ValueError("Runtime restart_history_provenance is invalid")
         if self.running_release_sha is not None and not re.fullmatch(
             r"[0-9a-f]{7,40}", self.running_release_sha
         ):
@@ -256,6 +272,56 @@ class RuntimeRecord:
     @property
     def restart_required(self) -> bool:
         return self.active_generation != self.accepted_generation
+
+
+@dataclass(frozen=True, slots=True)
+class RestartHistoryRecord:
+    """A durable restart-history ledger, deliberately separate from `RuntimeRecord`.
+
+    `RuntimeRecord` is a single, mutable, self-healing snapshot of the *currently
+    observed* process: `JsonRuntimeStore.read()` clears it entirely whenever the
+    recorded `pid` no longer matches a live process with the same identity
+    fingerprint -- correct for "is this claim about a running process still true,"
+    but by construction that check fires on essentially every real process
+    replacement, since a brand-new incarnation is never the same pid as the one
+    that just died. `restarts_total`/`last_restart_at` were being carried forward
+    by reading that same self-healing record, so they were being discarded as
+    collateral damage on the very restarts they exist to count (#448 Slice 4).
+
+    This ledger answers a different question -- "what has happened across every
+    incarnation of this runtime" -- and is never subject to pid-liveness checks:
+    a dead process's restart history is still true history.
+    """
+
+    protocol_version: int
+    restarts_total: int
+    last_restart_at: str | None
+    incarnation_id: str
+    updated_at: str
+    # The idempotency key of the restart event that produced this record's current
+    # `restarts_total`/`last_restart_at`. Replaying the same logical restart (a retry
+    # after a partial write failure, e.g.) must not increment a second time --
+    # `record_restart()` checks this before incrementing (#448 Slice 4).
+    last_event_id: str | None = None
+    # Why the most recent restart happened, if known -- diagnostic evidence, not a
+    # policy input.
+    last_restart_reason: str | None = None
+    #: "durable" once this ledger has genuinely tracked at least one restart itself;
+    #: "legacy_runtime_record" when it was seeded from a pre-ledger `RuntimeRecord`'s
+    #: `restarts_total` because no ledger existed yet at upgrade time -- distinct so an
+    #: operator reading a seeded value knows it is carried-forward evidence, not
+    #: something this ledger observed directly (#448 Slice 4 migration).
+    provenance: str = "durable"
+
+    def __post_init__(self) -> None:
+        if (
+            self.protocol_version != RUNTIME_CONTROL_PROTOCOL_VERSION
+            or self.restarts_total < 0
+            or not self.incarnation_id
+            or not self.updated_at
+            or self.provenance not in ("durable", "legacy_runtime_record")
+        ):
+            raise ValueError("Restart history record is invalid")
 
 
 def transition(
