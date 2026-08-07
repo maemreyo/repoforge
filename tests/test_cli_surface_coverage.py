@@ -149,6 +149,8 @@ def test_main_dispatches_all_command_families(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     store = FakeStore(tmp_path)
+    monkeypatch.setenv("REPOFORGE_RELEASE_ROOT", str(tmp_path / "releases"))
+    monkeypatch.setattr(cli, "default_state_root", lambda: tmp_path / "state")
     store.source_path.write_text("x", encoding="utf-8")
     store.active_resolved_path.write_text("x", encoding="utf-8")
     monkeypatch.setattr(cli, "_ensure_generation", lambda path: store)

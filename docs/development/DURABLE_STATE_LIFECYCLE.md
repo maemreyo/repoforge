@@ -82,6 +82,25 @@ Without `overwrite=True`, different existing records block apply. Unsupported re
 
 Ordinary failures restore replaced records and remove records created by the failed operation. If the process stops during apply, `recover_incomplete_restores` uses the private destination backup and journal metadata to roll the destination back after restart. Reapplying a committed restore returns the original structured report.
 
+## Durable operation repair
+
+Durable verification work has a separate exact-state repair workflow because deleting or requeueing an operation after a child may have started can duplicate execution. Repair is always preview/apply:
+
+```text
+rf operation repair preview OPERATION_ID
+rf operation repair apply OPERATION_ID --proposal-token TOKEN
+```
+
+The preview token binds the operation revision, work-item revision and lease, owner/attempt identity, child-start boundary, durable worker binding, and current process-reaper observation. Apply recomputes the proposal and rejects any changed state before signalling a process or writing a transition.
+
+Safe dispositions include terminal no-op, cancellation of queued work, requeue of an expired claim that never crossed the spawn boundary, and cancellation/orphaning only after a matching process group has been proven gone. Missing bindings, owner/attempt mismatch, PID-reuse ambiguity, and a child that survives containment are typed blockers. Blocked repair is read-only and preserves the operation, work item, and binding for inspection.
+
+Automatic recovery uses the same child-identity classifier and reports bounded blocker records instead of counting ambiguous containment as an optimistic-lock conflict. `conflicts` is reserved for state races; `blocked` means safety evidence is insufficient and operator review is required.
+
+## Execution-worker progress liveness
+
+Execution-worker bindings retain PID-safe identity and add optional `heartbeat_at`, `loop_state`, `current_operation_id`, and `last_recovery_at` fields. Older records decode with those fields absent. The child updates them while recovering, claiming, idling, and executing. The supervisor treats process liveness and progress liveness as separate checks, allows a bounded startup grace before the first heartbeat, and replaces a stale live worker only after the existing lifecycle confirms termination.
+
 ## Compatibility and non-goals
 
 - Existing `JsonStateRepository` serialization remains unchanged.

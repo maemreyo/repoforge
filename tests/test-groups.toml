@@ -203,12 +203,15 @@ test_files = [
   "tests/test_evidence_model.py",
   "tests/test_execution_plans.py",
   "tests/test_execution_worker_binding.py",
+  "tests/test_execution_worker_liveness.py",
   "tests/test_expensive_profile_guards.py",
   "tests/test_failure_intelligence.py",
   "tests/test_operation_execution_worker.py",
   "tests/test_operation_identity_leases.py",
   "tests/test_operation_observability.py",
   "tests/test_operation_progress_wait.py",
+  "tests/test_operation_recovery_blockers.py",
+  "tests/test_operation_repair.py",
   "tests/test_operation_tasks.py",
   "tests/test_operation_wait_event_loop.py",
   "tests/test_operation_work_queue.py",
@@ -595,13 +598,14 @@ test_files = [
 description = "Cross-cutting agent-facing subsystems that do not map to a single domain above: onboarding, skills, code intelligence, audit/observability, generic CLI/service composition."
 # parallel = true: this catch-all owns a few git-heavy files
 # (test_plan_execution.py, test_background_run_profile.py) but they are
-# tmp_path-isolated and xdist-safe. Serializing all 38 files to protect 2 is
+# tmp_path-isolated and xdist-safe. Serializing all 40 files to protect 2 is
 # a net time loss; their contention flakiness is addressed by the raised
 # pytest --timeout (see contracts note), not by the serial lane.
 parallel = true
-# A single 39-file xdist process exceeded 600s. These reviewed contiguous
-# resource families completed independently without increasing worker count.
-parallel_shard_sizes = [12, 13, 6, 8]
+# A single 40-file xdist process exceeds the bounded profile budget. These
+# reviewed contiguous resource families complete independently without
+# increasing worker count.
+parallel_shard_sizes = [12, 13, 6, 9]
 source_globs = [
   "src/repoforge/application/onboarding/**",
   "src/repoforge/application/skills/**",
@@ -657,6 +661,7 @@ test_files = [
   "tests/test_phase6_operational_hardening.py",
   "tests/test_phases1_4_real_git_integration.py",
   "tests/test_plan_execution.py",
+  "tests/test_plan_stage_binding.py",
   "tests/test_repository_discovery.py",
   "tests/test_root_module_architecture.py",
   "tests/test_service_tools.py",
@@ -699,6 +704,7 @@ test_files = [
   "tests/test_ci_failure_evidence.py",
   "tests/test_expensive_profile_guards.py",
   "tests/test_execution_worker_reconciler.py",
+  "tests/test_execution_worker_liveness.py",
   "tests/test_serve_config_generation.py",
   "tests/test_upgrade_compatibility.py",
   "tests/test_code_intelligence_integration.py",
@@ -727,6 +733,8 @@ test_files = [
   "tests/test_operation_execution_worker.py",
   "tests/test_operation_observability.py",
   "tests/test_operation_progress_wait.py",
+  "tests/test_operation_recovery_blockers.py",
+  "tests/test_operation_repair.py",
   "tests/test_operation_tasks.py",
   "tests/test_operation_wait_event_loop.py",
   "tests/test_operation_worker_binding.py",
@@ -739,6 +747,7 @@ test_files = [
   "tests/test_phases1_4_real_git_integration.py",
   "tests/test_phases1_5_full_lifecycle.py",
   "tests/test_plan_execution.py",
+  "tests/test_plan_stage_binding.py",
   "tests/test_pr_check_watch.py",
   "tests/test_repo_issue_graph_tools.py",
   "tests/test_repo_list_selection_v2.py",

@@ -149,6 +149,37 @@ class JsonExecutionWorkerBindingStore:
         )
         return updated
 
+    def update_heartbeat(
+        self,
+        worker_id: str,
+        *,
+        heartbeat_at: str,
+        loop_state: str,
+        current_operation_id: str | None,
+        recovery_completed: bool,
+    ) -> ExecutionWorkerBinding | None:
+        envelope = self._records.read(worker_id)
+        if envelope is None:
+            return None
+        current = envelope.value
+        updated = execution_worker_binding_from_payload(
+            execution_worker_binding_payload(current)
+            | {
+                "heartbeat_at": heartbeat_at,
+                "loop_state": loop_state,
+                "current_operation_id": current_operation_id,
+                "last_recovery_at": (
+                    heartbeat_at if recovery_completed else current.last_recovery_at
+                ),
+            }
+        )
+        self._records.save(
+            worker_id,
+            updated,
+            expected_revision=envelope.revision,
+        )
+        return updated
+
     def _archive_and_delete(self, worker_id: str, binding: ExecutionWorkerBinding) -> None:
         """Durably archive a terminal lease, then remove the active record (#424).
 

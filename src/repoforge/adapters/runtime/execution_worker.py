@@ -18,6 +18,7 @@ from ...domain.errors import ConfigError, ExecutionWorkerRegistrationError
 from ...domain.execution_worker import ExecutionWorkerBinding
 from ...domain.process_lease import ProcessLease, ProcessLeaseRole
 from ...domain.runtime import ChildProcess
+from ...ports.execution_worker import ExecutionWorkerProgressHealth
 from ...ports.execution_worker_store import ExecutionWorkerBindingStore
 from ...ports.process_reaper import ProcessReaper
 from ...ports.worker_registrar import WorkerRegistrar
@@ -209,6 +210,76 @@ class SubprocessExecutionWorker:
             and process_identity(child.pid) == child.process_identity
         )
 
+    def progress_health(
+        self,
+        child: ChildProcess,
+        *,
+        now: str,
+        stale_after_seconds: float,
+    ) -> ExecutionWorkerProgressHealth:
+        process_alive = self.is_alive(child)
+        if not process_alive:
+            return ExecutionWorkerProgressHealth(
+                process_alive=False,
+                heartbeat_available=False,
+                heartbeat_age_seconds=None,
+                progress_healthy=False,
+                loop_state=None,
+                current_operation_id=None,
+                detail="isolated execution worker process exited",
+            )
+        worker_id = self._worker_ids.get(child.pid)
+        binding = self._bindings.get(worker_id) if worker_id is not None else None
+        if binding is None:
+            return ExecutionWorkerProgressHealth(
+                process_alive=True,
+                heartbeat_available=False,
+                heartbeat_age_seconds=None,
+                progress_healthy=False,
+                loop_state=None,
+                current_operation_id=None,
+                detail="live execution worker has no readable durable binding",
+            )
+        heartbeat_available = binding.heartbeat_at is not None
+        observed_at = binding.heartbeat_at or binding.started_at
+        try:
+            age = max(
+                0.0,
+                (datetime.fromisoformat(now) - datetime.fromisoformat(observed_at)).total_seconds(),
+            )
+        except ValueError:
+            return ExecutionWorkerProgressHealth(
+                process_alive=True,
+                heartbeat_available=heartbeat_available,
+                heartbeat_age_seconds=None,
+                progress_healthy=False,
+                loop_state=binding.loop_state,
+                current_operation_id=binding.current_operation_id,
+                detail="execution worker heartbeat timestamp is invalid",
+            )
+        healthy = age <= stale_after_seconds
+        if heartbeat_available:
+            detail = (
+                f"execution worker heartbeat is fresh ({age:.1f}s old)"
+                if healthy
+                else f"execution worker heartbeat is stale ({age:.1f}s old)"
+            )
+        else:
+            detail = (
+                f"execution worker is within startup heartbeat grace ({age:.1f}s old)"
+                if healthy
+                else f"execution worker never published a heartbeat ({age:.1f}s since start)"
+            )
+        return ExecutionWorkerProgressHealth(
+            process_alive=True,
+            heartbeat_available=heartbeat_available,
+            heartbeat_age_seconds=age,
+            progress_healthy=healthy,
+            loop_state=binding.loop_state,
+            current_operation_id=binding.current_operation_id,
+            detail=detail,
+        )
+
     def terminate(self, child: ChildProcess, *, grace_seconds: float) -> None:
         """Group-aware termination: same death semantics as the reconciler reaper.
 
@@ -238,11 +309,17 @@ class SubprocessExecutionWorker:
         self._children.pop(child.pid, None)
         if outcome.reaped:
             self._apply_lifecycle(child.pid, "reclaimed" if outcome.attempted else "already_gone")
-        elif outcome.still_alive:
+            return
+        if outcome.still_alive:
             self._apply_lifecycle(child.pid, "survived_kill")
-        else:
-            # PID reuse or unproven containment without a live claim: refuse reclaimed.
-            self._apply_lifecycle(child.pid, "refused_unproven")
+            raise ExecutionWorkerRegistrationError(
+                f"EXECUTION_WORKER_TERMINATION_UNCONFIRMED: {outcome.detail}"
+            )
+        # PID reuse or unproven containment without a live claim: refuse reclaimed.
+        self._apply_lifecycle(child.pid, "refused_unproven")
+        raise ExecutionWorkerRegistrationError(
+            f"EXECUTION_WORKER_TERMINATION_UNPROVEN: {outcome.detail}"
+        )
 
     def _establish_stable_identity(self, process: subprocess.Popen[bytes]) -> str | None:
         """Wait for the worker's process identity to settle, then record it.

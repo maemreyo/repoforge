@@ -33,6 +33,7 @@ class CancellationToken:
         raise_on_spawn_error: bool = False,
         on_bind: Callable[[int], None] | None = None,
         raise_on_bind_error: bool = False,
+        on_release: Callable[[], None] | None = None,
     ) -> None:
         self._lock = threading.Lock()
         self._process: _KillableProcess | None = None
@@ -41,6 +42,7 @@ class CancellationToken:
         self._raise_on_spawn_error = raise_on_spawn_error
         self._on_bind = on_bind
         self._raise_on_bind_error = raise_on_bind_error
+        self._on_release = on_release
 
     def before_spawn(self) -> None:
         """Cross the durable spawn boundary before a subprocess is created.
@@ -79,9 +81,13 @@ class CancellationToken:
             self._terminate(process)
 
     def release(self) -> None:
-        """Detach the bound process once it has exited; safe to call unconditionally."""
+        """Detach the exited process and best-effort release its durable observer state."""
         with self._lock:
             self._process = None
+            observer = self._on_release
+        if observer is not None:
+            with contextlib.suppress(Exception):
+                observer()
 
     def cancel(self) -> None:
         """Request cancellation, signalling a bound process group immediately if any."""
