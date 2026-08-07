@@ -19,7 +19,7 @@ from repoforge.application.workspace.run_adhoc import WorkspaceRunAdhocResult
 from repoforge.application.workspace.verify import _adhoc_evidence
 from repoforge.config import load_config
 from repoforge.contracts.v2 import AdhocEvidence
-from repoforge.domain.adhoc import MAX_ADHOC_STDIN_LENGTH
+from repoforge.domain.adhoc import MAX_ADHOC_ARGV_ELEMENTS, MAX_ADHOC_STDIN_LENGTH
 from repoforge.domain.errors import ConfigError, ErrorCode, RepoForgeError
 
 
@@ -239,7 +239,7 @@ def test_argv_over_bound_is_rejected(tmp_path: Path) -> None:
     env = _relaxed_env(tmp_path)
     created = env.service.workspace_create("demo", "argv too long")
     workspace_id = created["workspace_id"]
-    argv = ["python3", *[f"--flag{i}" for i in range(40)]]
+    argv = ["python3", *[f"--flag{i}" for i in range(MAX_ADHOC_ARGV_ELEMENTS + 1)]]
     with pytest.raises(RepoForgeError) as exc:
         env.service.workspace_run_adhoc(workspace_id, argv)
     assert exc.value.code is ErrorCode.ADHOC_ARGV_INVALID

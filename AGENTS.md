@@ -279,6 +279,24 @@ Capability-expanding changes (adding `adhoc_runners`, relaxing `execution_mode`,
 `rf config pending` / `rf config approve <change_id>`; never apply them on your own authority.
 Never hand-edit the resolved generations under the state root.
 
+### Shipping a code fix to the live instance
+
+A running RepoForge is a frozen copy under `~/.local/share/repoforge/releases/`; editing this
+checkout does nothing to it until a new release is built and activated with `rf upgrade`.
+
+1. Commit first — `rf upgrade` refuses `WORKTREE_DIRTY` on an uncommitted checkout.
+2. `rf upgrade --from-worktree . --keep 5` — build, smoke-test, and install without activating
+   (`status: staged`; `active_sha` unchanged, so a bad build never touches the running instance).
+3. `rf upgrade --from-worktree . --activate --watch --health-window 90 --keep 5` — activate with
+   an auto-rollback health window; keep the returned `activation_receipt`.
+4. Verify against the running process, not the source tree: `rf runtime status`'s
+   `running_executable` must point at the new release's sha. A test that imports this checkout's
+   source directly (or overrides `sys.path`) proves the fix, not that the deployed server has it.
+5. Regression after activation: `rf upgrade rollback <activation-receipt>`.
+
+Never run `--activate` unstaged or without `--watch` — an unstaged, unwatched activate that fails
+can leave no release verified as serving at all (`rf upgrade reconcile` recovers from that state).
+
 ## Documentation rules
 
 Update documentation in the same patch when changing:

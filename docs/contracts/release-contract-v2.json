@@ -89,8 +89,8 @@
       "tool_surface_hash": "a35cf906a086c19e7235b638266e65f7a45c94626984d12816b6a6215f9258b7"
     },
     "identity": "forge_v2",
-    "input_contract_digest": "c23e520b191aec449ca4c87bdd0e14529a206a876619b72a9525f41055876009",
-    "output_contract_digest": "6969b8d51aba8368c8c719b90621f735381086a83554142ed0d5227f81d2c302",
+    "input_contract_digest": "75d20cc000221ffa6db97dd437ebddb8697199320477c0706d1cbd9c6f97cf13",
+    "output_contract_digest": "e5048267590496fe87762079c9c19705687f10daac04298a6fb573a0ee0775c8",
     "retired_identity": "forge_v1",
     "server_instructions_sha256": "8c74bb77fd9cd7d5d204a1d6b15fa658d922637ffa48dcdf95db9c44ddecafd2",
     "tool_contract": {
@@ -103,7 +103,7 @@
     "tool_count": 29,
     "tool_hashes": {
       "config_inspect": "ce1d583179bf4e4b0fd94f163f1a8d70761c5c0a44dd12ad498275d8f030be85",
-      "operation": "642e65fd58c34c4fe880f7e71c6ac5902d5522a76abb0942268f41be4968b140",
+      "operation": "78e23b0c6ab36b154c1c26fcaeee0c3b559ae9a623b5c1b657af18bdca8177e1",
       "repo_history": "85a5bfcf262a302dd0e06e6323a2e0a7eab80df80e9232d6b9a608ac8f08df5d",
       "repo_issue": "688d3a392736bc4e6a0fbce3bf49c9a85c1a810f7161d66129459b34111c9d2c",
       "repo_list": "989c4d42f79570cb0aeeed88771de5f58a81d4f40d0205baa7cf9b2175878e61",
@@ -117,7 +117,7 @@
       "workspace_commit": "197c8b28a8ce2221727d51a2ebc09750bd99c582d66d8e0820fccb94b115f69c",
       "workspace_create": "980a3f4a0862a5a2623b6a4805641676a3049051e07c9c4bfd1ae1ef735be1ee",
       "workspace_diff": "d61e51641ab09f4fffa176aaa9e19bb8a354579fceceaa6ae81dd701daeacb5a",
-      "workspace_exec": "9b3e9fd1f7fe8abadbbc5181c6bfca1098a4774358da234f39378933b2a01ff9",
+      "workspace_exec": "135ee4f406cbdb1146afcc9ffae49bb10ebb03f27939bb8be034a1aa7170b7f5",
       "workspace_format_changed": "62c7d33fec9d9c72f56f726668ab830e7e93a3cb900c2e8cd0f9a7063a026e5d",
       "workspace_list": "8c552bc85142a351807ab75139668f61904ad16a2d5517908bceccaf71a19a16",
       "workspace_mutate": "42ca644b7166675447ded8708a61652ba2178b6948075100763ba628548fbeaa",
@@ -130,7 +130,7 @@
       "workspace_search": "e1f7aecbc740eb07771fc1e3f0a49b839f3813dad74005b30b4a79ab35597765",
       "workspace_status": "6490db671f5a190ac00e94e5efbe4c28b835a7299813bdbf3eefb78c5ad73d6a",
       "workspace_tree": "48db4ca1c88059c48c9b3f66a2d2cf932ac5e337a4d2c82841bfb8567c312f22",
-      "workspace_verify": "8a58de7a7573020fe99a5464141beef2637c597e613db577468bc6946a524263"
+      "workspace_verify": "64aaf01ef3e79830b58e25eb4438bdeb684a249b7976bc09c45a49233ce5f3c9"
     },
     "tool_names": [
       "repo_task_context",
@@ -163,8 +163,8 @@
       "config_inspect",
       "runtime_logs_read"
     ],
-    "tool_schema_bundle_sha256": "38df908205a31a62ba2cb76e0dcc827a260f58e8423a466d20302088dd025c7b",
-    "tool_surface_hash": "09b8f64133cdcc0a1ae445ff8141c4c6fc0a0dd1a184d8b42f32d54f63a90c2e"
+    "tool_schema_bundle_sha256": "4bf04d90a1c57fe7ef92a0c4b62fe81a189541c86e76566e5fd8621aebd3ab5d",
+    "tool_surface_hash": "58af5892b9d4c7b56b8c87ca0ee39b7bcaadfc679af0e479d5906647dbe9ea1d"
   },
   "package_version": "2.2.0",
   "runtime": {
