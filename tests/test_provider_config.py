@@ -13,7 +13,12 @@ from repoforge.domain.provider_manifest import ProviderExecutableIdentity, Provi
 from repoforge.testing.fakes import ScriptedCommandExecutor
 
 
-def _resolved_config(tmp_path: Path, provider_block: str) -> Path:
+def _resolved_config(
+    tmp_path: Path,
+    provider_block: str,
+    *,
+    repository_fields: str = "",
+) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".git").mkdir()
@@ -27,6 +32,7 @@ state_root = "{tmp_path / "state"}"
 
 [repositories.demo]
 path = "{repo}"
+{repository_fields}
 ''',
         encoding="utf-8",
     )
@@ -192,3 +198,166 @@ executable_digest = "{digest}"
 
     assert application.context.provider_registry is not None
     assert application.context.provider_registry.get_provider("python-analyzer") is not None
+
+
+def _codegraph_provider_block(*, options: str = "") -> str:
+    return f'''[[providers]]
+provider_id = "codegraph"
+kind = "analyzer"
+version = "1.5.0"
+executable = "/opt/codegraph"
+executable_digest = "{"a" * 64}"
+supported_languages = ["python", "typescript"]
+supported_capabilities = ["semantic_graph"]
+network_policy = "none"
+
+[providers.filesystem]
+capability = "managed_state_write"
+allowed_paths = []
+
+[providers.codegraph]
+{options}
+'''
+
+
+def test_load_config_parses_codegraph_options_and_repository_opt_in(tmp_path: Path) -> None:
+    config = _resolved_config(
+        tmp_path,
+        _codegraph_provider_block(options="query_timeout_seconds = 30"),
+        repository_fields='code_intelligence_provider_id = "codegraph"',
+    )
+
+    loaded = load_config(config)
+    provider = loaded.providers[0]
+
+    assert provider.codegraph is not None
+    assert provider.codegraph.query_timeout_seconds == 30
+    assert loaded.repositories["demo"].code_intelligence_provider_id == "codegraph"
+
+
+def test_repository_codegraph_opt_in_defaults_disabled(tmp_path: Path) -> None:
+    loaded = load_config(_resolved_config(tmp_path, ""))
+
+    assert loaded.repositories["demo"].code_intelligence_provider_id == ""
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("init_timeout_seconds", 0),
+        ("sync_timeout_seconds", 301),
+        ("query_timeout_seconds", 121),
+        ("max_changed_paths", 2_001),
+        ("max_relationships", 1_001),
+        ("max_affected_paths", 2_001),
+        ("max_depth", 11),
+        ("projection_max_files", 0),
+        ("projection_max_bytes", 0),
+        ("canary_timeout_seconds", 601),
+    ],
+)
+def test_load_config_rejects_invalid_codegraph_options(
+    tmp_path: Path,
+    field: str,
+    value: int,
+) -> None:
+    config = _resolved_config(
+        tmp_path,
+        _codegraph_provider_block(options=f"{field} = {value}"),
+    )
+
+    with pytest.raises(ConfigError, match=field):
+        load_config(config)
+
+
+def test_load_config_rejects_unknown_codegraph_option(tmp_path: Path) -> None:
+    config = _resolved_config(
+        tmp_path,
+        _codegraph_provider_block(options="unsafe_option = 1"),
+    )
+
+    with pytest.raises(ConfigError, match="unsupported CodeGraph options"):
+        load_config(config)
+
+
+def test_repository_provider_id_is_not_environment_expanded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODEGRAPH_PROVIDER", "codegraph")
+    config = _resolved_config(
+        tmp_path,
+        "",
+        repository_fields='code_intelligence_provider_id = "$CODEGRAPH_PROVIDER"',
+    )
+
+    with pytest.raises(ConfigError, match="code_intelligence_provider_id"):
+        load_config(config)
+
+
+def test_repository_codegraph_opt_in_rejects_unknown_provider(tmp_path: Path) -> None:
+    config = _resolved_config(
+        tmp_path,
+        "",
+        repository_fields='code_intelligence_provider_id = "codegraph"',
+    )
+
+    with pytest.raises(ConfigError, match="unknown provider"):
+        load_config(config)
+
+
+def test_repository_codegraph_opt_in_rejects_non_codegraph_provider(tmp_path: Path) -> None:
+    config = _resolved_config(
+        tmp_path,
+        f'''[[providers]]
+provider_id = "python-analyzer"
+kind = "analyzer"
+version = "1.0.0"
+executable = "python3"
+executable_digest = "{"a" * 64}"
+supported_capabilities = ["lint"]
+''',
+        repository_fields='code_intelligence_provider_id = "python-analyzer"',
+    )
+
+    with pytest.raises(ConfigError, match="reviewed CodeGraph enrollment"):
+        load_config(config)
+
+
+def test_resolved_document_preserves_nested_codegraph_options() -> None:
+    document = {
+        "providers": [
+            {
+                "provider_id": "codegraph",
+                "kind": "analyzer",
+                "version": "1.5.0",
+                "executable": "/opt/codegraph",
+                "executable_digest": "a" * 64,
+                "supported_capabilities": ["semantic_graph"],
+                "network_policy": "none",
+                "filesystem": {"capability": "managed_state_write", "allowed_paths": []},
+                "codegraph": {"query_timeout_seconds": 30, "max_depth": 4},
+            }
+        ],
+        "repositories": {
+            "demo": {
+                "path": "/repos/demo",
+                "code_intelligence_provider_id": "codegraph",
+            }
+        },
+    }
+
+    rendered = render_resolved(
+        document,
+        generation=2,
+        source_path="config.toml",
+        source_sha256="b" * 64,
+        created_at="2026-08-06T00:00:00+00:00",
+        reason="codegraph enrollment",
+        proposal_id=None,
+        repository_fingerprints=(("demo", "c" * 64),),
+    )
+
+    resolved = parse_resolved(rendered)
+    assert resolved["providers"][0]["codegraph"] == document["providers"][0]["codegraph"]
+    assert resolved["repositories"]["demo"]["code_intelligence_provider_id"] == "codegraph"

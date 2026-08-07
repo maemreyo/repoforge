@@ -82,6 +82,15 @@ def test_cross_process_keyed_write_executes_effect_once(
 ) -> None:
     workspace_id = forge_env.service.workspace_create("demo", "cross-process-write")["workspace_id"]
     worker = tmp_path / "mutation_worker.py"
+    worker_config = tmp_path / "worker-config.toml"
+    worker_config.write_text(
+        forge_env.config_path.read_text(encoding="utf-8").replace(
+            "[server]\n",
+            "[server]\nidempotency_lock_timeout_seconds = 30\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
     start = tmp_path / "start"
     first_result = tmp_path / "first.json"
     second_result = tmp_path / "second.json"
@@ -96,7 +105,7 @@ from repoforge.config import load_config
 start = Path({str(start)!r})
 while not start.exists():
     time.sleep(0.01)
-service = CodingService(load_config(Path({str(forge_env.config_path)!r})))
+service = CodingService(load_config(Path({str(worker_config)!r})))
 result = service.workspace_write_file(
     {workspace_id!r},
     "concurrent.txt",
@@ -109,13 +118,25 @@ Path(sys.argv[1]).write_text(json.dumps(result, sort_keys=True), encoding="utf-8
         encoding="utf-8",
     )
 
-    first = subprocess.Popen([sys.executable, str(worker), str(first_result)])
-    second = subprocess.Popen([sys.executable, str(worker), str(second_result)])
+    first = subprocess.Popen(
+        [sys.executable, str(worker), str(first_result)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    second = subprocess.Popen(
+        [sys.executable, str(worker), str(second_result)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     try:
         time.sleep(0.1)
         start.write_text("go\n", encoding="utf-8")
-        assert first.wait(timeout=15) == 0
-        assert second.wait(timeout=15) == 0
+        first_stdout, first_stderr = first.communicate(timeout=45)
+        second_stdout, second_stderr = second.communicate(timeout=45)
+        assert first.returncode == 0, first_stderr or first_stdout
+        assert second.returncode == 0, second_stderr or second_stdout
     finally:
         if first.poll() is None:
             first.kill()

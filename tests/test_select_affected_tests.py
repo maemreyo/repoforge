@@ -552,6 +552,31 @@ def test_coverage_map_changed_test_file_runs_itself() -> None:
     assert selection.selected_files == ("tests/test_c.py", "tests/test_smoke.py")
 
 
+def test_coverage_map_test_support_module_falls_back_to_reviewed_group() -> None:
+    manifest = _manifest(
+        groups=(
+            _group(
+                "codegraph",
+                source_globs=("tests/fixtures/codegraph_canary/**",),
+                test_files=("tests/test_codegraph_canaries.py",),
+            ),
+        ),
+        safety_bundle=("tests/test_smoke.py",),
+        coverage_map={"src/repoforge/existing.py": ("tests/test_existing.py",)},
+    )
+
+    selection = selector.select_affected_tests(
+        manifest,
+        ["tests/fixtures/codegraph_canary/src/alpha.py"],
+    )
+
+    assert selection.escalated_to_wide is False
+    assert selection.selected_files == (
+        "tests/test_codegraph_canaries.py",
+        "tests/test_smoke.py",
+    )
+
+
 def test_coverage_map_non_package_path_falls_back_to_group_globs() -> None:
     manifest = _coverage_manifest()
 

@@ -7,6 +7,10 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
+from ...domain.code_intelligence_routing import (
+    TARGETED_VERIFICATION_CONFIDENCE,
+    semantic_graph_payload_allows_targeted_routing,
+)
 from ...domain.diagnostics import DiagnosticExpectation, DiagnosticFailureClass
 from ...domain.errors import (
     CommandError,
@@ -55,7 +59,7 @@ from .snapshot import WorkspaceSnapshotReader
 
 VerifyMode = Literal["plan", "auto", "diagnostic", "profile", "adhoc"]
 VerifyRerun = Literal["failed"]
-_HIGH_CONFIDENCE = 95
+_HIGH_CONFIDENCE = TARGETED_VERIFICATION_CONFIDENCE
 _MAX_ARTIFACT_BYTES = 120_000
 
 
@@ -161,6 +165,12 @@ def _assessment_projection(assessment: Any) -> tuple[dict[str, object], dict[str
             "coverage": _string_list(intelligence.get("analyzed_paths"))[:100],
             "limitations": _string_list(intelligence.get("limitations"))[:100],
         }
+        semantic_status = intelligence.get("semantic_status")
+        if isinstance(semantic_status, str):
+            impact_evidence["semantic_status"] = semantic_status
+        widening_reason = intelligence.get("semantic_widening_reason")
+        if isinstance(widening_reason, str):
+            impact_evidence["semantic_widening_reason"] = widening_reason
     projection = {
         "snapshot_id": assessment.snapshot.snapshot_id,
         "current": assessment.current,
@@ -238,6 +248,11 @@ def _auto_target(assessment: Any) -> tuple[str, list[str], str] | None:
     if (
         code_intelligence.status.value != "current"
         or code_intelligence.coverage.value != "complete"
+    ):
+        return None
+    semantic_graph = code_intelligence.value.get("semantic_graph")
+    if semantic_graph is not None and not semantic_graph_payload_allows_targeted_routing(
+        semantic_graph
     ):
         return None
     candidates = code_intelligence.value.get("affected_tests")
@@ -623,10 +638,15 @@ class WorkspaceVerifier:
                 profile_name = final_profile
                 fallback_full = True
                 status = assessment.code_intelligence.status.value
-                routing_reason = (
-                    f"Code-intelligence evidence is {status} or below {_HIGH_CONFIDENCE}% confidence; "
-                    f"falling back to final profile {final_profile!r}."
-                )
+                semantic_reason = assessment.code_intelligence.value.get("semantic_widening_reason")
+                if isinstance(semantic_reason, str):
+                    routing_reason = f"{semantic_reason} Falling back to {final_profile!r}."
+                else:
+                    routing_reason = (
+                        f"Code-intelligence evidence is {status} or below "
+                        f"{_HIGH_CONFIDENCE}% confidence; falling back to final profile "
+                        f"{final_profile!r}."
+                    )
 
         if selected_mode == "diagnostic":
             if not diagnostic_id:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
@@ -8,7 +8,14 @@ from typing import Any, cast
 
 def to_data(value: Any) -> Any:
     if is_dataclass(value):
-        return to_data(asdict(cast(Any, value)))
+        instance = cast(Any, value)
+        payload: dict[str, Any] = {}
+        for definition in fields(instance):
+            item = getattr(instance, definition.name)
+            if item is None and definition.metadata.get("omit_if_none") is True:
+                continue
+            payload[definition.name] = to_data(item)
+        return payload
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Path):

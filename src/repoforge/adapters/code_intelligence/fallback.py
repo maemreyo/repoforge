@@ -32,6 +32,7 @@ def _with_limitation(result: CodeIntelligenceResult, limitation: str) -> CodeInt
         denied_paths=result.denied_paths,
         limitations=tuple((*result.limitations, limitation)),
         truncated=result.truncated,
+        semantic_graph=result.semantic_graph,
     )
 
 

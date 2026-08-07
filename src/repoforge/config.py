@@ -45,7 +45,7 @@ from .domain.hygiene import (
 from .domain.issue_writes import IssueWritePolicy, IssueWritePolicyError
 from .domain.mutation_policy import MUTATION_OPS, validate_allowed_mutation_ops
 from .domain.provider_config import load_provider_manifests
-from .domain.provider_manifest import ProviderManifest
+from .domain.provider_manifest import ProviderManifest, validate_provider_id
 from .domain.repository_identity import (
     ActorClass,
     CredentialKind,
@@ -207,6 +207,7 @@ class RepositoryConfig:
     require_verification_before_commit: bool = True
     fetch_before_workspace: bool = True
     default_verification_profile: str | None = None
+    code_intelligence_provider_id: str = ""
     max_changed_files: int = 150
     max_diff_lines: int = 12_000
     max_total_changed_bytes: int = 25 * 1024 * 1024
@@ -454,6 +455,29 @@ def _safe_remote(value: str, context: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", value) or value.startswith("-"):
         raise ConfigError(f"{context} must be a safe configured remote name: {value!r}")
     return value
+
+
+def _code_intelligence_provider_id(
+    value: Any,
+    context: str,
+    providers_by_id: dict[str, ProviderManifest],
+) -> str:
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise ConfigError(f"{context} must be a provider id string")
+    try:
+        provider_id = validate_provider_id(value)
+    except ValueError as exc:
+        raise ConfigError(f"{context} is invalid: {exc}") from exc
+    provider = providers_by_id.get(provider_id)
+    if provider is None:
+        raise ConfigError(f"{context} references unknown provider {provider_id!r}")
+    if provider.codegraph is None:
+        raise ConfigError(
+            f"{context} must reference a reviewed CodeGraph enrollment, got {provider_id!r}"
+        )
+    return provider_id
 
 
 def _resolve_repository_preset(raw: dict[str, Any], repo_id: str) -> dict[str, Any]:
@@ -1349,6 +1373,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         ),
     )
     auth_profiles = _load_auth_profiles(raw.get("auth_profiles"))
+    providers = load_provider_manifests(raw.get("providers"))
+    providers_by_id: dict[str, ProviderManifest] = {}
+    for provider in providers:
+        if provider.provider_id in providers_by_id:
+            raise ConfigError(f"providers contains duplicate provider_id {provider.provider_id!r}")
+        providers_by_id[provider.provider_id] = provider
     repositories_raw = _expect_mapping(raw.get("repositories"), "repositories")
     if not repositories_raw:
         raise ConfigError("At least one repository must be configured")
@@ -1525,6 +1555,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 f"repositories.{repo_id}.fetch_before_workspace",
             ),
             default_verification_profile=default_verification,
+            code_intelligence_provider_id=_code_intelligence_provider_id(
+                repo_raw.get("code_intelligence_provider_id"),
+                f"repositories.{repo_id}.code_intelligence_provider_id",
+                providers_by_id,
+            ),
             max_changed_files=_positive_int(
                 repo_raw.get("max_changed_files"), 150, f"repositories.{repo_id}.max_changed_files"
             ),
@@ -1590,7 +1625,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                     f"{alias!r}); a checkout may be attached through only one alias"
                 )
             _checkout_owners[canonical] = (repo_id, alias)
-    providers = load_provider_manifests(raw.get("providers"))
     return AppConfig(
         source_path=config_path,
         server=server,

@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from .codegraph_config import CodeGraphOptions
+
 _MANIFEST_SCHEMA_VERSION = 1
 _PROVIDER_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -46,6 +48,14 @@ class ConfidenceModel(str, Enum):
 def _validate_digest(value: str) -> None:
     if not _SHA256.fullmatch(value):
         raise ValueError("Provider runtime digest must be a lowercase SHA-256")
+
+
+def validate_provider_id(value: str, *, allow_empty: bool = False) -> str:
+    if allow_empty and value == "":
+        return value
+    if not _PROVIDER_ID.fullmatch(value):
+        raise ValueError(f"Invalid provider_id: {value!r}")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,12 +132,12 @@ class ProviderManifest:
     output_bounds: ProviderOutputBounds = ProviderOutputBounds()
     fallback_provider_id: str = ""
     schema_version: int = _MANIFEST_SCHEMA_VERSION
+    codegraph: CodeGraphOptions | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != _MANIFEST_SCHEMA_VERSION:
             raise ValueError(f"Unsupported manifest schema version: {self.schema_version}")
-        if not _PROVIDER_ID.fullmatch(self.provider_id):
-            raise ValueError(f"Invalid provider_id: {self.provider_id!r}")
+        validate_provider_id(self.provider_id)
         if not self.version or not _VERSION.fullmatch(self.version):
             raise ValueError(f"Invalid version: {self.version!r}")
         self._validate_names(self.supported_languages, "supported_languages")
@@ -138,6 +148,26 @@ class ProviderManifest:
             raise ValueError(f"Invalid network_policy: {self.network_policy!r}")
         if self.fallback_provider_id and not _PROVIDER_ID.fullmatch(self.fallback_provider_id):
             raise ValueError(f"Invalid fallback_provider_id: {self.fallback_provider_id!r}")
+        if self.codegraph is not None:
+            if not isinstance(self.codegraph, CodeGraphOptions):
+                raise ValueError("CodeGraph enrollment options must use CodeGraphOptions")
+            self._validate_codegraph_enrollment()
+
+    def _validate_codegraph_enrollment(self) -> None:
+        if self.kind is not ProviderKind.ANALYZER:
+            raise ValueError("CodeGraph enrollment requires kind='analyzer'")
+        if not isinstance(self.runtime, ProviderExecutableIdentity):
+            raise ValueError("CodeGraph enrollment requires an executable runtime")
+        if "semantic_graph" not in self.supported_capabilities:
+            raise ValueError("CodeGraph enrollment requires the semantic_graph capability")
+        if self.network_policy != "none":
+            raise ValueError("CodeGraph enrollment requires network_policy='none'")
+        if self.filesystem.capability != "managed_state_write":
+            raise ValueError(
+                "CodeGraph enrollment requires filesystem capability='managed_state_write'"
+            )
+        if self.fallback_provider_id:
+            raise ValueError("CodeGraph enrollment uses augmentation and cannot declare a fallback")
 
     @staticmethod
     def _validate_names(values: tuple[str, ...], field: str) -> None:
@@ -173,6 +203,9 @@ class ProviderManifest:
                 "max_artifact_bytes": self.output_bounds.max_artifact_bytes,
             },
             "fallback_provider_id": self.fallback_provider_id,
+            "codegraph_options_digest": (
+                self.codegraph.options_digest if self.codegraph is not None else ""
+            ),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()

@@ -20,6 +20,10 @@ from ...domain.assessment import (
     validate_workspace_assessment,
 )
 from ...domain.code_intelligence import CodeIntelligenceStatus
+from ...domain.code_intelligence_routing import (
+    semantic_graph_allows_targeted_routing,
+    semantic_graph_widening_reason,
+)
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...domain.evidence import evidence_payload
 from ...domain.policy import assert_path_allowed
@@ -290,6 +294,15 @@ class WorkspaceAssessmentReader:
                     )
                 )
                 intelligence_payload = to_data(analysis.result)
+                semantic_graph = analysis.result.semantic_graph
+                if semantic_graph is not None:
+                    intelligence_payload["semantic_status"] = semantic_graph.status.value
+                    intelligence_payload["semantic_targeting_allowed"] = (
+                        semantic_graph_allows_targeted_routing(semantic_graph)
+                    )
+                    widening_reason = semantic_graph_widening_reason(semantic_graph)
+                    if widening_reason is not None:
+                        intelligence_payload["semantic_widening_reason"] = widening_reason
                 if analysis.evidence is not None:
                     intelligence_payload["evidence"] = evidence_payload(analysis.evidence)
                 if analysis.result.status is CodeIntelligenceStatus.CURRENT:

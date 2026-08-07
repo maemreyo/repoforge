@@ -60,6 +60,37 @@ path = "/absolute/path/to/repository"
 # policy_template = "strict"
 # decisions = []
 # policy_overrides = []
+# CodeGraph semantic intelligence is disabled by default. This field belongs in the
+# reviewed resolved repository entry; removing or emptying it restores exact baseline
+# construction without changing any MCP tool surface.
+# code_intelligence_provider_id = ""
+#
+# Reviewed provider enrollment example (immutable resolved configuration, not editable
+# source authority). The executable digest and version are pinned; runtime execution uses
+# CODEGRAPH_NO_DAEMON=1 and CODEGRAPH_NO_DOWNLOAD=1 and never self-updates.
+# [[providers]]
+# provider_id = "codegraph"
+# kind = "analyzer"
+# version = "1.5.0"
+# executable = "/opt/repoforge/providers/codegraph"
+# executable_digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# supported_languages = ["python", "javascript", "typescript"]
+# supported_capabilities = ["semantic_graph"]
+# network_policy = "none"
+# [providers.filesystem]
+# capability = "managed_state_write"
+# allowed_paths = []
+# [providers.codegraph]
+# init_timeout_seconds = 60
+# sync_timeout_seconds = 120
+# query_timeout_seconds = 30
+# max_changed_paths = 200
+# max_relationships = 200
+# max_affected_paths = 200
+# max_depth = 4
+# projection_max_files = 20000
+# projection_max_bytes = 268435456
+# canary_timeout_seconds = 120
 
 # Reviewed policy customizations (custom profiles, diagnostics, formatters) live in a
 # durable per-repository patch that survives `rf repo refresh`. The `repo_policy`

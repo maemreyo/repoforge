@@ -10,6 +10,15 @@ from enum import Enum
 from pathlib import Path
 from typing import TypeVar
 
+from .code_intelligence_model import (
+    AffectedPathCandidate,
+    AffectedTestCandidate,
+    CodeIntelligenceMeasure,
+    CodeIntelligenceStatus,
+    CodeRelationshipFact,
+    CodeRelationshipKind,
+    SemanticGraphEvidence,
+)
 from .errors import ErrorCode, RepoForgeError
 
 MAX_CODE_INTELLIGENCE_PATHS = 2_000
@@ -87,32 +96,11 @@ class CodeLanguage(str, Enum):
     TYPESCRIPT = "typescript"
 
 
-class CodeIntelligenceStatus(str, Enum):
-    CURRENT = "current"
-    PARTIAL = "partial"
-    UNAVAILABLE = "unavailable"
-
-
 class CodeSymbolKind(str, Enum):
     CLASS = "class"
     FUNCTION = "function"
     METHOD = "method"
     VARIABLE = "variable"
-
-
-@dataclass(frozen=True, slots=True)
-class CodeIntelligenceMeasure:
-    value: int
-    reason: str
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.value, int)
-            or isinstance(self.value, bool)
-            or not 0 <= self.value <= 100
-        ):
-            raise _invalid("code-intelligence measure must be an integer between 0 and 100")
-        object.__setattr__(self, "reason", _text(self.reason, "measure reason"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,35 +224,6 @@ class CodeReferenceFact:
 
 
 @dataclass(frozen=True, slots=True)
-class AffectedTestCandidate:
-    test_path: str
-    reason: str
-    confidence: int
-    diagnostic_id: str | None = None
-    selector: str | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "test_path", _path(self.test_path, "test_path"))
-        object.__setattr__(self, "reason", _text(self.reason, "affected-test reason"))
-        if (
-            not isinstance(self.confidence, int)
-            or isinstance(self.confidence, bool)
-            or not 0 <= self.confidence <= 100
-        ):
-            raise _invalid("affected-test confidence must be an integer between 0 and 100")
-        if self.diagnostic_id is not None:
-            object.__setattr__(
-                self,
-                "diagnostic_id",
-                _safe_id(self.diagnostic_id, "diagnostic_id"),
-            )
-        if self.selector is not None:
-            object.__setattr__(self, "selector", _text(self.selector, "diagnostic selector"))
-        if (self.diagnostic_id is None) != (self.selector is None):
-            raise _invalid("diagnostic_id and selector must be present together")
-
-
-@dataclass(frozen=True, slots=True)
 class CodeIntelligenceRequest:
     workspace_root: Path
     snapshot: CodeIntelligenceSnapshot
@@ -315,6 +274,10 @@ class CodeIntelligenceResult:
     denied_paths: tuple[str, ...]
     limitations: tuple[str, ...]
     truncated: bool = False
+    semantic_graph: SemanticGraphEvidence | None = field(
+        default=None,
+        metadata={"omit_if_none": True},
+    )
 
 
 FactT = TypeVar("FactT")
@@ -347,6 +310,7 @@ def new_code_intelligence_result(
     denied_paths: tuple[str, ...] = (),
     limitations: tuple[str, ...] = (),
     truncated: bool = False,
+    semantic_graph: SemanticGraphEvidence | None = None,
 ) -> CodeIntelligenceResult:
     if not isinstance(status, CodeIntelligenceStatus):
         raise _invalid("status must be CodeIntelligenceStatus")
@@ -354,6 +318,8 @@ def new_code_intelligence_result(
         raise _invalid("snapshot must be CodeIntelligenceSnapshot")
     if not isinstance(truncated, bool):
         raise _invalid("truncated must be a boolean")
+    if semantic_graph is not None and not isinstance(semantic_graph, SemanticGraphEvidence):
+        raise _invalid("semantic_graph must use SemanticGraphEvidence")
     normalized_limitations = _bounded_unique(limitations, "limitations")
     if len(normalized_limitations) > MAX_CODE_INTELLIGENCE_LIMITATIONS:
         raise _invalid(f"limitations exceeds {MAX_CODE_INTELLIGENCE_LIMITATIONS} items")
@@ -382,6 +348,7 @@ def new_code_intelligence_result(
         denied_paths=_bounded_unique(denied_paths, "denied_paths", paths=True),
         limitations=normalized_limitations,
         truncated=truncated,
+        semantic_graph=semantic_graph,
     )
 
 
@@ -408,6 +375,7 @@ __all__ = [
     "MAX_CODE_INTELLIGENCE_FACTS",
     "MAX_CODE_INTELLIGENCE_LIMITATIONS",
     "MAX_CODE_INTELLIGENCE_PATHS",
+    "AffectedPathCandidate",
     "AffectedTestCandidate",
     "CodeImportFact",
     "CodeIntelligenceMeasure",
@@ -417,8 +385,11 @@ __all__ = [
     "CodeIntelligenceStatus",
     "CodeLanguage",
     "CodeReferenceFact",
+    "CodeRelationshipFact",
+    "CodeRelationshipKind",
     "CodeSymbolFact",
     "CodeSymbolKind",
+    "SemanticGraphEvidence",
     "new_code_intelligence_result",
     "unavailable_code_intelligence",
 ]

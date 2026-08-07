@@ -56,6 +56,7 @@ from ..ports import (
     OperationWorkQueue,
     ProcessReaper,
     ProviderRegistry,
+    ProviderWorkspaceLifecycle,
     PublicationTargetInspector,
     PullRequestGateway,
     RepositoryBindingStore,
@@ -275,6 +276,10 @@ class ApplicationContext:
         kw_only=True,
     )
     code_intelligence: CodeIntelligenceProvider | None = None
+    provider_workspace_lifecycle: ProviderWorkspaceLifecycle | None = field(
+        default=None,
+        kw_only=True,
+    )
     github_read_cache: GitHubReadCache | None = None
     hygiene: HygieneGateway | None = None
     hygiene_cache: HygieneBaselineCache | None = None

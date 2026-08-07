@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .codegraph_config import codegraph_options_from_config
 from .errors import ConfigError
 from .provider_manifest import (
     ConfidenceModel,
@@ -149,6 +150,10 @@ def provider_manifest_from_config(raw: object, context: str) -> ProviderManifest
                 table.get("fallback_provider_id"),
                 f"{context}.fallback_provider_id",
                 default="",
+            ),
+            codegraph=codegraph_options_from_config(
+                table.get("codegraph"),
+                f"{context}.codegraph",
             ),
             schema_version=_positive(table.get("schema_version"), 1, f"{context}.schema_version"),
         )

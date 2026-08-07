@@ -40,6 +40,11 @@ from .adapters.code_intelligence import (
     SyntaxCodeIntelligenceProvider,
     TreeSitterCodeIntelligenceProvider,
 )
+from .adapters.codegraph import (
+    build_codegraph_runtime,
+    codegraph_doctor_checks,
+    codegraph_operator_report,
+)
 from .adapters.configuration import ConfigGenerationStore
 from .adapters.execution.native import NativeReviewedAdapter
 from .adapters.filesystem import JournaledFileTransactionFactory, LocalFileSystem
@@ -287,6 +292,7 @@ from .ports import (
     ProcessInspector,
     ProcessReaper,
     ProviderRegistry,
+    ProviderWorkspaceLifecycle,
     PullRequestGateway,
     RepositoryBindingStore,
     RepositoryDiscovery,
@@ -379,6 +385,10 @@ class AdapterOverrides:
         kw_only=True,
     )
     code_intelligence: CodeIntelligenceProvider | None = None
+    provider_workspace_lifecycle: ProviderWorkspaceLifecycle | None = field(
+        default=None,
+        kw_only=True,
+    )
     approvals: ApprovalStore | None = None
     approval_payloads: ApprovalPayloadStore | None = None
     issue_mutations: IssueMutationGateway | None = None
@@ -438,6 +448,24 @@ def build_repository_probe(state_root: Path | None = None) -> RepositoryProbe:
     root = (state_root or default_state_root()).expanduser().resolve()
     server = ServerConfig(root / "probe-workspaces", root)
     return LocalRepositoryProbe(SubprocessCommandExecutor(server))
+
+
+def build_code_intelligence_operator_report(
+    config: AppConfig,
+    registry: ProviderRegistry,
+) -> dict[str, object]:
+    """Project provider-specific operator state through the composition root."""
+
+    return codegraph_operator_report(config, registry)
+
+
+def build_code_intelligence_doctor_checks(
+    config: AppConfig,
+    registry: ProviderRegistry,
+) -> tuple[dict[str, object], ...]:
+    """Return secret-free provider checks without leaking adapter types to interfaces."""
+
+    return tuple(check.as_dict() for check in codegraph_doctor_checks(config, registry))
 
 
 def build_onboarding_store(
@@ -1797,10 +1825,34 @@ def build_application(
         observe=observe_repository_identity,
         clock=clock,
     )
-    code_intelligence = o.code_intelligence or FallbackCodeIntelligenceProvider(
-        primary=TreeSitterCodeIntelligenceProvider(),
-        fallback=SyntaxCodeIntelligenceProvider(),
-    )
+    provider_workspace_lifecycle = o.provider_workspace_lifecycle
+    if o.code_intelligence is not None:
+        code_intelligence = o.code_intelligence
+    else:
+        baseline_code_intelligence = FallbackCodeIntelligenceProvider(
+            primary=TreeSitterCodeIntelligenceProvider(),
+            fallback=SyntaxCodeIntelligenceProvider(),
+        )
+        codegraph_runtime = build_codegraph_runtime(
+            config,
+            baseline_code_intelligence,
+            provider_registry,
+            command,
+            locks,
+            clock,
+        )
+        code_intelligence = codegraph_runtime.provider
+        if provider_workspace_lifecycle is None:
+            provider_workspace_lifecycle = codegraph_runtime.lifecycle
+        if codegraph_runtime.lifecycle is not None:
+            try:
+                active_workspace_ids = frozenset(record.workspace_id for record in store.list())
+                codegraph_runtime.lifecycle.startup_cleanup(
+                    active_workspace_ids,
+                    limit=100,
+                )
+            except Exception:
+                pass
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
     idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
     execution_plans = o.execution_plans or JsonExecutionPlanStore(config.server.state_root, locks)
@@ -1878,6 +1930,7 @@ def build_application(
         repository_identity_runtime=repository_identity_runtime,
         git_transport_router=git_transport_router,
         code_intelligence=code_intelligence,
+        provider_workspace_lifecycle=provider_workspace_lifecycle,
         metrics=metrics,
         idempotency=idempotency,
         operation_store=operation_store,
