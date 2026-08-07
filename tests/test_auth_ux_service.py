@@ -423,6 +423,117 @@ def test_bind_refuses_a_stale_revision_without_changing_state(tmp_path: Path) ->
     assert service._bindings.read("github.com", "987654").value == before.value
 
 
+def test_reconcile_config_revision_requires_an_expected_revision(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    created = service.bind(repo_id="demo", selector=AuthProfileSelector())
+    binding = service._bindings.read("github.com", "987654")
+    assert binding is not None
+    assert created["status"] == "created"
+    drifted = AuthUxService(
+        config=service._config,
+        bindings=service._bindings,
+        observe=lambda repo_id, selector: _observation(config_revision="d" * 64),
+    )
+
+    with pytest.raises(RepoForgeError) as failure:
+        drifted.bind(repo_id="demo", selector=AuthProfileSelector())
+
+    assert failure.value.code is ErrorCode.INPUT_REQUIRED
+    assert drifted._bindings.read("github.com", "987654").value.config_revision == _SHA
+    assert drifted._bindings.read("github.com", "987654").revision == binding.revision
+
+
+def test_reconcile_refreshes_only_the_config_revision_with_the_reviewed_revision(
+    tmp_path: Path,
+) -> None:
+    service = _service(
+        tmp_path,
+        profiles={
+            "personal": _profile_config("personal"),
+            "automation": _profile_config("automation", actor_class=ActorClass.AUTONOMOUS_AGENT),
+        },
+    )
+    service.bind(repo_id="demo", selector=AuthProfileSelector())
+    service.bind(
+        repo_id="demo", selector=AuthProfileSelector(actor_class=RequestedActorClass.AGENT)
+    )
+    before = service._bindings.read("github.com", "987654")
+    assert before.value.human_profile_id == "personal"
+    assert before.value.agent_profile_id == "automation"
+
+    drifted = AuthUxService(
+        config=service._config,
+        bindings=service._bindings,
+        observe=lambda repo_id, selector: _observation(config_revision="d" * 64),
+    )
+    reconciled = drifted.bind(
+        repo_id="demo",
+        selector=AuthProfileSelector(),
+        expected_binding_revision=before.revision.value,
+    )
+
+    assert reconciled["status"] == "reconciled"
+    after = service._bindings.read("github.com", "987654")
+    assert after.revision != before.revision
+    assert after.value.config_revision == "d" * 64
+    # The refresh changed only the config revision, never the identity or the roles.
+    assert after.value.human_profile_id == "personal"
+    assert after.value.agent_profile_id == "automation"
+    assert after.value.repository_id == "987654"
+    assert after.value.canonical_name == "github.com/acme/demo"
+
+
+def test_reconcile_refuses_a_wrong_binding_revision(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    service.bind(repo_id="demo", selector=AuthProfileSelector())
+    before = service._bindings.read("github.com", "987654")
+
+    drifted = AuthUxService(
+        config=service._config,
+        bindings=service._bindings,
+        observe=lambda repo_id, selector: _observation(config_revision="d" * 64),
+    )
+    with pytest.raises(RepoForgeError) as failure:
+        drifted.bind(
+            repo_id="demo",
+            selector=AuthProfileSelector(),
+            expected_binding_revision=before.revision.value + 99,
+        )
+
+    assert failure.value.code is ErrorCode.STATE_STALE
+    assert service._bindings.read("github.com", "987654").value == before.value
+
+
+def test_reconcile_refuses_when_the_repository_identity_changed(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    service.bind(repo_id="demo", selector=AuthProfileSelector())
+    before = service._bindings.read("github.com", "987654")
+    assert before is not None
+
+    changed = AuthUxService(
+        config=service._config,
+        bindings=service._bindings,
+        observe=lambda repo_id, selector: RepositoryIdentityObservation(
+            provider=RepositoryProvider.GITHUB,
+            provider_host="github.com",
+            repository_id="987654",
+            canonical_name="github.com/other/demo",
+            exists=True,
+            observed_at=NOW,
+            config_revision="d" * 64,
+        ),
+    )
+    with pytest.raises(RepoForgeError) as failure:
+        changed.bind(
+            repo_id="demo",
+            selector=AuthProfileSelector(),
+            expected_binding_revision=before.revision.value,
+        )
+
+    assert failure.value.code is ErrorCode.CREDENTIAL_SCOPE_MISMATCH
+    assert service._bindings.read("github.com", "987654").revision == before.revision
+
+
 def test_unbind_clears_one_role_and_refuses_to_clear_the_last_one(tmp_path: Path) -> None:
     service = _service(
         tmp_path,
