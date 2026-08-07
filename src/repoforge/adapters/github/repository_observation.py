@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -169,13 +170,14 @@ class GhCliRepositoryObserver:
         )
 
     def _read_remote(self, repo: RepositoryConfig) -> str:
-        result = self._executor.run_isolated(
-            ["git", "config", "--local", "--get", f"remote.{repo.remote}.url"],
-            cwd=repo.path,
-            environment=self._base_environment(repo.path),
-            secrets=(),
-            output_limit=16_384,
-        )
+        with tempfile.TemporaryDirectory(prefix="repoforge-repository-observation-") as root:
+            result = self._executor.run_isolated(
+                ["git", "config", "--local", "--get", f"remote.{repo.remote}.url"],
+                cwd=repo.path,
+                environment=self._base_environment(Path(root)),
+                secrets=(),
+                output_limit=16_384,
+            )
         remote = result.stdout.strip()
         if not remote:
             raise _unavailable("The configured repository remote is missing.")
@@ -207,7 +209,7 @@ class GhCliRepositoryObserver:
         ):
             raise _mismatch("Reviewed SSH endpoint does not match the live repository remote.")
 
-    def _base_environment(self, cwd: Path) -> dict[str, str]:
+    def _base_environment(self, temporary_root: Path) -> dict[str, str]:
         inherited = self._executor.environment()
         environment = {
             key: inherited[key]
@@ -216,8 +218,8 @@ class GhCliRepositoryObserver:
         }
         environment.update(
             {
-                "HOME": str(cwd / ".repoforge-empty-home"),
-                "GH_CONFIG_DIR": str(cwd / ".repoforge-empty-gh-config"),
+                "HOME": str(temporary_root / "home"),
+                "GH_CONFIG_DIR": str(temporary_root / "gh-config"),
                 "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_TERMINAL_PROMPT": "0",
@@ -264,20 +266,21 @@ class GhCliRepositoryObserver:
                 retryable=False,
                 unchanged_state=("No identity was resolved.",),
             )
-        environment = self._base_environment(cwd)
-        environment["GH_TOKEN"] = token
-        payload = self._payload(
-            [
-                "gh",
-                "api",
-                "--hostname",
-                target.provider_host,
-                f"repos/{target.owner}/{target.repository}",
-            ],
-            cwd,
-            environment=environment,
-            secrets=context.secret_values,
-        )
+        with tempfile.TemporaryDirectory(prefix="repoforge-repository-observation-") as root:
+            environment = self._base_environment(Path(root))
+            environment["GH_TOKEN"] = token
+            payload = self._payload(
+                [
+                    "gh",
+                    "api",
+                    "--hostname",
+                    target.provider_host,
+                    f"repos/{target.owner}/{target.repository}",
+                ],
+                cwd,
+                environment=environment,
+                secrets=context.secret_values,
+            )
         raw = payload.get("id")
         if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
             raise _unavailable(

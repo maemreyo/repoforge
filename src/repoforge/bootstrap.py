@@ -8,6 +8,7 @@ import os
 import pwd
 import shutil
 import sys
+import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -952,27 +953,28 @@ def build_auth_command_dependencies(
             for key in ("PATH", "LANG", "LC_ALL")
             if key in inherited and isinstance(inherited[key], str)
         }
-        environment.update(
-            {
-                "HOME": str(working_directory / ".repoforge-empty-home"),
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_TERMINAL_PROMPT": "0",
-            }
-        )
-        result = commands.run_isolated(
-            [
-                "git",
-                "config",
-                "--local",
-                "--get",
-                f"remote.{selected_repository.remote}.url",
-            ],
-            cwd=selected_repository.path,
-            environment=environment,
-            secrets=(),
-            output_limit=16_384,
-        )
+        with tempfile.TemporaryDirectory(prefix="repoforge-auth-migration-") as home:
+            environment.update(
+                {
+                    "HOME": home,
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_TERMINAL_PROMPT": "0",
+                }
+            )
+            result = commands.run_isolated(
+                [
+                    "git",
+                    "config",
+                    "--local",
+                    "--get",
+                    f"remote.{selected_repository.remote}.url",
+                ],
+                cwd=selected_repository.path,
+                environment=environment,
+                secrets=(),
+                output_limit=16_384,
+            )
         raw = result.stdout.strip()
         if not raw:
             raise _auth_observation_error(

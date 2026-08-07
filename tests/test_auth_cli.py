@@ -46,6 +46,7 @@ from repoforge.domain.repository_identity_resolution import (
 )
 from repoforge.interfaces.cli.auth import add_auth_parsers, run_auth_command
 from repoforge.ports.auth_inspection import RepositoryObservationTarget
+from repoforge.ports.command import CommandResult
 from repoforge.testing import FixedClock
 
 cli = importlib.import_module("repoforge.interfaces.cli.main")
@@ -756,3 +757,50 @@ def test_production_auth_dependencies_fail_closed_without_profiles(
 
     assert failure.value.code is ErrorCode.INPUT_REQUIRED
     assert observed == []
+
+
+def test_auth_migration_remote_keeps_synthetic_home_outside_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bootstrap = importlib.import_module("repoforge.bootstrap")
+    repo_root = tmp_path / "demo"
+    repo_root.mkdir()
+    config = AppConfig(
+        source_path=tmp_path / "config.toml",
+        server=ServerConfig(tmp_path / "workspaces", tmp_path / "state"),
+        repositories={"demo": RepositoryConfig(repo_id="demo", path=repo_root)},
+        auth_profiles={},
+    )
+
+    class Commands:
+        def environment(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+            return {"HOME": "/home/wrong-active-user", "PATH": "/bin", **dict(extra or {})}
+
+        def run_isolated(self, argv: list[str], **kwargs: Any) -> CommandResult:
+            Path(kwargs["environment"]["HOME"]).mkdir(parents=True, exist_ok=True)
+            return CommandResult(
+                tuple(argv),
+                str(kwargs["cwd"]),
+                0,
+                "git@github.com:acme/demo.git\n",
+                "",
+            )
+
+    class Migration:
+        def __init__(self, *, observe: Any, **kwargs: Any) -> None:
+            del kwargs
+            self.observe = observe
+
+    monkeypatch.setattr(bootstrap, "SubprocessCommandExecutor", lambda server: Commands())
+    monkeypatch.setattr(bootstrap, "AuthMigrationService", Migration)
+    dependencies = bootstrap.build_auth_command_dependencies(
+        object(),  # type: ignore[arg-type]
+        config=config,
+        config_revision=_SHA,
+        cwd=repo_root,
+    )
+
+    observation = dependencies.migration.observe("demo", None)
+
+    assert observation.canonical_name == "github.com/acme/demo"
+    assert not (repo_root / ".repoforge-empty-home").exists()
