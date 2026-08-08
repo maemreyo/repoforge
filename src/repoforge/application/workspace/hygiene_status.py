@@ -87,6 +87,7 @@ class WorkspaceHygieneStatusReader:
             command.workspace_id,
             self.ctx.git,
             workspace,
+            persist=False,
         ).fingerprint
         head_sha = self.ctx.git.head_sha(workspace)
         if policy is None:

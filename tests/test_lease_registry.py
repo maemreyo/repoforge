@@ -9,6 +9,7 @@ authoritative; these tests prove the shadow mirrors it and reports drift.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -749,6 +750,34 @@ def test_record_pid_failure_reaps_the_spawned_worker(
 # ---------------------------------------------------------------------------
 # Admission epoch (P1-3): the registrar refuses spawns while admission is fenced.
 # ---------------------------------------------------------------------------
+
+
+def test_admission_permit_claim_is_atomic_across_store_instances(tmp_path: Path) -> None:
+    from repoforge.adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
+
+    locks = InMemoryLockManager()
+    first = JsonAdmissionEpochStore(tmp_path / "state", locks)
+    second = JsonAdmissionEpochStore(tmp_path / "state", locks)
+    epoch = first.close()
+    token = first.issue_permit(target="release-a")
+    start = threading.Barrier(2)
+    results: list[bool] = []
+
+    def claim(store: JsonAdmissionEpochStore) -> None:
+        start.wait(timeout=2.0)
+        results.append(store.claim_permit(epoch, token=token, target="release-a"))
+
+    threads = (
+        threading.Thread(target=claim, args=(first,)),
+        threading.Thread(target=claim, args=(second,)),
+    )
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(results) == [False, True]
 
 
 def test_admission_epoch_round_trips_through_the_json_store(tmp_path: Path) -> None:

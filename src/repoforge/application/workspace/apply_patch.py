@@ -79,6 +79,7 @@ class WorkspacePatchApplier:
                     c.workspace_id,
                     self.ctx.git,
                     path,
+                    persist=True,
                 )
                 before = before_lookup.fingerprint
                 if before != c.expected_workspace_fingerprint:

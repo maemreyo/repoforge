@@ -13,6 +13,7 @@ from ...domain.errors import ConfigError, ErrorCode
 from ...domain.redaction import redact_data
 from ...ports.clock import Clock
 from ..system import SystemClock
+from .locking import locked_audit_log
 
 _SEQ_RECOVERY_TAIL_BYTES = 65_536
 _REPO_LIST_COMPACTION_THRESHOLD = 25
@@ -118,6 +119,46 @@ class JsonlAuditSink:
             and details.get("origin") in {"model", "connector", "internal", "background_worker"}
         )
 
+    def _append_event(
+        self,
+        *,
+        timestamp: str,
+        action: str,
+        success: bool,
+        details: dict[str, Any],
+    ) -> None:
+        with locked_audit_log(self.path):
+            self._seq = max(self._seq, self._recover_last_seq()) + 1
+            payload = {
+                "timestamp": timestamp,
+                "pid": os.getpid(),
+                "seq": self._seq,
+                "action": action,
+                "success": success,
+                "details": details,
+            }
+            encoded = (json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n").encode(
+                "utf-8"
+            )
+            if len(encoded) > self._max_event_bytes:
+                payload["details"] = {
+                    "event_truncated": True,
+                    "event_sha256": hashlib.sha256(encoded).hexdigest(),
+                    "original_bytes": len(encoded),
+                }
+                encoded = (json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n").encode(
+                    "utf-8"
+                )
+            rotated = self._rotate(len(encoded))
+            existed = self.path.exists()
+            descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(descriptor, "ab", buffering=0) as handle:
+                handle.write(encoded)
+                os.fsync(handle.fileno())
+            os.chmod(self.path, 0o600)
+            if rotated or not existed:
+                self._fsync_dir(self.path.parent)
+
     def record(self, action: str, *, success: bool, details: dict[str, Any]) -> None:
         try:
             with self._lock:
@@ -158,39 +199,12 @@ class JsonlAuditSink:
                         state["last_timestamp"] = timestamp
                         state["suppressed_count"] = 0
 
-                # Sequence assignment and the append must share one lock scope: two writers
-                # each incrementing under separate acquisitions could still land their writes
-                # out of order, breaking the monotonic-cursor guarantee (#210).
-                self._seq += 1
-                payload = {
-                    "timestamp": timestamp,
-                    "pid": os.getpid(),
-                    "seq": self._seq,
-                    "action": action,
-                    "success": success,
-                    "details": payload_details,
-                }
-                encoded = (json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n").encode(
-                    "utf-8"
+                self._append_event(
+                    timestamp=timestamp,
+                    action=action,
+                    success=success,
+                    details=payload_details,
                 )
-                if len(encoded) > self._max_event_bytes:
-                    payload["details"] = {
-                        "event_truncated": True,
-                        "event_sha256": hashlib.sha256(encoded).hexdigest(),
-                        "original_bytes": len(encoded),
-                    }
-                    encoded = (
-                        json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n"
-                    ).encode("utf-8")
-                rotated = self._rotate(len(encoded))
-                existed = self.path.exists()
-                descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-                with os.fdopen(descriptor, "ab", buffering=0) as handle:
-                    handle.write(encoded)
-                    os.fsync(handle.fileno())
-                os.chmod(self.path, 0o600)
-                if rotated or not existed:
-                    self._fsync_dir(self.path.parent)
         except OSError as exc:
             raise ConfigError(
                 f"STATE_PERSISTENCE_FAILED: cannot append private audit log {self.path}: {exc}",

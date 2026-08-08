@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from ...domain.errors import ConfigError
+from ..filesystem.atomic import atomic_write_text
+from .locking import locked_audit_log
 
 _MAX_SCAN_BYTES = 20_000_000
 _AUDIT_CURSOR_PREFIX = "audit-v1"
@@ -484,39 +486,38 @@ def prune_audit_log(
         raise ConfigError(
             "--before must include a timezone offset (e.g. 2026-07-16T08:00:00+00:00)"
         )
-    if not path.is_file():
-        return 0
-    try:
-        with path.open("r") as handle:
-            lines = handle.readlines()
-    except OSError as exc:
-        raise ConfigError(f"Cannot read audit log {path}: {exc}") from exc
-
-    kept: list[str] = []
-    pruned = 0
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+    with locked_audit_log(path):
+        if not path.is_file():
+            return 0
         try:
-            event = json.loads(line)
-        except ValueError:
-            pruned += 1
-            continue
-        ts = event.get("timestamp", "")
-        try:
-            event_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            pruned += 1
-            continue
-        if event_time < cutoff:
-            pruned += 1
-        else:
-            kept.append(line + "\n")
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise ConfigError(f"Cannot read audit log {path}: {exc}") from exc
 
-    try:
-        with path.open("w") as handle:
-            handle.writelines(kept)
-    except OSError as exc:
-        raise ConfigError(f"Cannot write audit log {path}: {exc}") from exc
-    return pruned
+        kept: list[str] = []
+        pruned = 0
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                pruned += 1
+                continue
+            ts = event.get("timestamp", "")
+            try:
+                event_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                pruned += 1
+                continue
+            if event_time < cutoff:
+                pruned += 1
+            else:
+                kept.append(line + "\n")
+
+        try:
+            atomic_write_text(path, "".join(kept))
+        except OSError as exc:
+            raise ConfigError(f"Cannot write audit log {path}: {exc}") from exc
+        return pruned

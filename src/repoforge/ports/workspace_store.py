@@ -6,6 +6,7 @@ portable and application tests can inject persistence failures independently fro
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from ..domain.workspace import WorkspaceRecord
@@ -15,6 +16,12 @@ class WorkspaceStore(Protocol):
     def save(self, record: WorkspaceRecord) -> None: ...
 
     def load(self, workspace_id: str) -> WorkspaceRecord: ...
+
+    def update(
+        self,
+        workspace_id: str,
+        updater: Callable[[WorkspaceRecord], None],
+    ) -> WorkspaceRecord: ...
 
     def delete(self, workspace_id: str) -> None: ...
 

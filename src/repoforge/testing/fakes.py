@@ -163,6 +163,7 @@ class InMemoryWorkspaceStore:
     def __init__(self, injector: FailureInjector | None = None) -> None:
         self.records: dict[str, WorkspaceRecord] = {}
         self.injector = injector or FailureInjector()
+        self._update_lock = threading.Lock()
 
     def save(self, record: WorkspaceRecord) -> None:
         self.injector.hit("workspace_store.save")
@@ -171,6 +172,21 @@ class InMemoryWorkspaceStore:
     def load(self, workspace_id: str) -> WorkspaceRecord:
         self.injector.hit("workspace_store.load")
         return self.records[workspace_id]
+
+    def update(
+        self,
+        workspace_id: str,
+        updater: Callable[[WorkspaceRecord], None],
+    ) -> WorkspaceRecord:
+        self.injector.hit("workspace_store.update")
+        with self._update_lock:
+            record = replace(
+                self.records[workspace_id],
+                metadata=dict(self.records[workspace_id].metadata),
+            )
+            updater(record)
+            self.records[workspace_id] = record
+            return record
 
     def delete(self, workspace_id: str) -> None:
         self.injector.hit("workspace_store.delete")
@@ -230,6 +246,7 @@ class InMemoryOperationStore:
 class InMemoryLockManager:
     def __init__(self) -> None:
         self._held: set[str] = set()
+        self._shared: dict[str, int] = {}
         self._condition = threading.Condition()
 
     def path_for(self, name: str) -> Path:
@@ -248,7 +265,7 @@ class InMemoryLockManager:
         # can branch on the same typed error in tests as in production.
         deadline = None if timeout_seconds is None else time.monotonic() + max(0.0, timeout_seconds)
         with self._condition:
-            while name in self._held:
+            while name in self._held or self._shared.get(name, 0) > 0:
                 if deadline is None:
                     self._condition.wait(timeout=0.05)
                     continue
@@ -264,9 +281,40 @@ class InMemoryLockManager:
                 self._held.remove(name)
                 self._condition.notify_all()
 
+    @contextmanager
+    def shared_lock(
+        self,
+        name: str,
+        *,
+        timeout_seconds: float | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> Iterator[None]:
+        del metadata
+        deadline = None if timeout_seconds is None else time.monotonic() + max(0.0, timeout_seconds)
+        with self._condition:
+            while name in self._held:
+                if deadline is None:
+                    self._condition.wait(timeout=0.05)
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ConfigError(f"LOCK_TIMEOUT: could not acquire {name!r}")
+                self._condition.wait(timeout=remaining)
+            self._shared[name] = self._shared.get(name, 0) + 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                remaining = self._shared[name] - 1
+                if remaining:
+                    self._shared[name] = remaining
+                else:
+                    del self._shared[name]
+                self._condition.notify_all()
+
     @property
     def held(self) -> frozenset[str]:
-        return frozenset(self._held)
+        return frozenset(self._held | self._shared.keys())
 
 
 class InMemoryOperationGate:

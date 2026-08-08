@@ -200,15 +200,21 @@ class ConfigGenerationStore:
         """Return the immutable resolved config path for a validated generation."""
         return self.generation_path(generation) / "resolved.toml"
 
-    def read_resolved_text(self, generation: int | None = None) -> str:
-        selected = generation
-        if selected is None:
-            current = self.current()
-            if current is None:
-                raise ConfigError("No accepted configuration generation")
-            selected = current.generation
-        self._load(selected)
-        return (self._path(selected) / "resolved.toml").read_text(encoding="utf-8")
+    def read_resolved_text(self, generation: int) -> str:
+        self._load(generation)
+        return (self._path(generation) / "resolved.toml").read_text(encoding="utf-8")
+
+    def read_accepted_resolved_text(self) -> str:
+        accepted = self.current()
+        if accepted is None:
+            raise ConfigError("No accepted configuration generation")
+        return self.read_resolved_text(accepted.generation)
+
+    def read_active_resolved_text(self) -> str:
+        active = self.active()
+        if active is None:
+            raise ConfigError("No active configuration generation")
+        return self.read_resolved_text(active.generation)
 
     def _store_generation(
         self, generation: ConfigGeneration, source_text: str, resolved_text: str

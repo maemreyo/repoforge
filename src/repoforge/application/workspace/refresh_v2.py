@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,20 @@ _MAX_GENERATED_CONFLICTS = 1_000
 _MAX_RESOLUTION_BYTES = 2_000_000
 _MAX_EVIDENCE_BYTES = 60_000
 _JOURNAL_SCHEMA_VERSION = 1
+
+
+def _restore_workspace_record(current: WorkspaceRecord, snapshot: WorkspaceRecord) -> None:
+    if current.workspace_id != snapshot.workspace_id:
+        raise WorkspaceError("Refresh journal workspace identity does not match the registry")
+    current.repo_id = snapshot.repo_id
+    current.path = snapshot.path
+    current.branch = snapshot.branch
+    current.base = snapshot.base
+    current.remote = snapshot.remote
+    current.created_at = snapshot.created_at
+    current.last_verification = deepcopy(snapshot.last_verification)
+    current.metadata = deepcopy(snapshot.metadata)
+    current.kind = snapshot.kind
 
 
 def _changed_line_count(before: str, after: str) -> int:
@@ -295,7 +310,10 @@ class _RefreshJournal:
             # backups could later overwrite the restored reviewed tree.
             open_file_transaction(self.ctx, self.workspace).recover_pending()
             self.ctx.git.reset_hard(self.workspace, old_head)
-            self.ctx.store.save(record)
+            self.ctx.store.update(
+                self.workspace_id,
+                lambda current: _restore_workspace_record(current, record),
+            )
             prime_fingerprint(
                 self.ctx.fingerprint_cache,
                 self.workspace_id,
@@ -521,6 +539,7 @@ class WorkspaceRefreshV2:
                     command.workspace_id,
                     self.ctx.git,
                     workspace,
+                    persist=True,
                 ).fingerprint
                 if head != command.expected_head_sha or fingerprint != command.expected_fingerprint:
                     raise self._stale("workspace HEAD or fingerprint changed")
@@ -619,21 +638,26 @@ class WorkspaceRefreshV2:
                     )
                     new_head = managed.head_sha
                     identity_evidence = managed.evidence.safe_payload()
-                    invalidated = invalidate_workspace_refresh_receipts(record)
-                    record.metadata["workspace_base_sha"] = plan.target_base_sha
-                    record.metadata["last_refresh_target_sha"] = plan.target_base_sha
-                    record.metadata["last_refresh_at"] = self.ctx.clock.now_iso()
-                    record.metadata["refresh_commit_sha"] = new_head
-                    self._persist_regeneration_receipts(
-                        record,
-                        regeneration_receipts,
-                        refresh_commit_sha=new_head,
-                        target_base_sha=plan.target_base_sha,
-                        plan_hash=plan.plan_hash,
-                    )
-                    record.metadata["last_commit_identity_evidence"] = identity_evidence
+                    invalidated: tuple[str, ...] = ()
+
+                    def persist_refresh(fresh: WorkspaceRecord) -> None:
+                        nonlocal invalidated
+                        invalidated = invalidate_workspace_refresh_receipts(fresh)
+                        fresh.metadata["workspace_base_sha"] = plan.target_base_sha
+                        fresh.metadata["last_refresh_target_sha"] = plan.target_base_sha
+                        fresh.metadata["last_refresh_at"] = self.ctx.clock.now_iso()
+                        fresh.metadata["refresh_commit_sha"] = new_head
+                        self._persist_regeneration_receipts(
+                            fresh,
+                            regeneration_receipts,
+                            refresh_commit_sha=new_head,
+                            target_base_sha=plan.target_base_sha,
+                            plan_hash=plan.plan_hash,
+                        )
+                        fresh.metadata["last_commit_identity_evidence"] = identity_evidence
+
                     audit_details["commit_identity"] = identity_evidence
-                    self.ctx.store.save(record)
+                    record = self.ctx.store.update(command.workspace_id, persist_refresh)
                     changed_paths = tuple(
                         sorted(
                             set(
@@ -774,6 +798,7 @@ class WorkspaceRefreshV2:
                     command.workspace_id,
                     self.ctx.git,
                     workspace,
+                    persist=True,
                 ).fingerprint
                 if head != command.expected_head_sha or fingerprint != command.expected_fingerprint:
                     raise self._stale("workspace HEAD or fingerprint changed")
@@ -919,17 +944,20 @@ class WorkspaceRefreshV2:
             self.ctx.git,
             workspace,
         ).fingerprint
-        invalidate_workspace_refresh_receipts(record)
-        record.metadata["workspace_base_sha"] = target_sha
-        record.metadata["last_recreate_target_sha"] = target_sha
-        record.metadata["last_recreate_at"] = self.ctx.clock.now_iso()
-        record.metadata["last_recreate_transaction_id"] = transaction_id
-        record.metadata["last_recreate_plan_hash"] = plan_hash
-        record.metadata["last_recreate_previous_head_sha"] = old_head
-        record.metadata["last_recreate_request_fingerprint"] = request_digest
-        record.metadata["last_recreate_workspace_fingerprint"] = final_fingerprint
-        record.metadata["last_recreate_verify_selector"] = list(verify_selector)
-        self.ctx.store.save(record)
+
+        def persist_recreate(fresh: WorkspaceRecord) -> None:
+            invalidate_workspace_refresh_receipts(fresh)
+            fresh.metadata["workspace_base_sha"] = target_sha
+            fresh.metadata["last_recreate_target_sha"] = target_sha
+            fresh.metadata["last_recreate_at"] = self.ctx.clock.now_iso()
+            fresh.metadata["last_recreate_transaction_id"] = transaction_id
+            fresh.metadata["last_recreate_plan_hash"] = plan_hash
+            fresh.metadata["last_recreate_previous_head_sha"] = old_head
+            fresh.metadata["last_recreate_request_fingerprint"] = request_digest
+            fresh.metadata["last_recreate_workspace_fingerprint"] = final_fingerprint
+            fresh.metadata["last_recreate_verify_selector"] = list(verify_selector)
+
+        record = self.ctx.store.update(record.workspace_id, persist_recreate)
         journal.checkpoint("after_recreate_registry_saved")
         journal.mark_phase("registry_saved")
 
@@ -1072,6 +1100,7 @@ class WorkspaceRefreshV2:
             record.workspace_id,
             self.ctx.git,
             workspace,
+            persist=True,
         ).fingerprint
         if current_head != head or current_fingerprint != fingerprint:
             raise self._stale("workspace changed while computing refresh plan")

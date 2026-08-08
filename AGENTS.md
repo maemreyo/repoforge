@@ -40,22 +40,37 @@ instead.
 ## Repository layout
 
 ```text
-src/repoforge/config.py       TOML models, defaults, and validation
-src/repoforge/discovery.py    repository detection and config rendering
-src/repoforge/user_config.py  minimal user intent and reviewed runtime config locks
-src/repoforge/security.py     branch, path, patch, and policy enforcement
-src/repoforge/runner.py       constrained subprocess execution
-src/repoforge/state.py        workspace registry, locks, fingerprints, receipts
-src/repoforge/service.py      Git, worktree, gh, verification, and PR operations
-src/repoforge/onboarding.py   setup, repository enrollment, and tunnel startup UX
-src/repoforge/server.py       MCP tool metadata and registration
-src/repoforge/cli.py          init, doctor, smoke test, audit, and tunnel DX
-tests/                        unit, security, integration, CLI, and MCP contract tests
-docs/                         setup, operations, tools, testing, and golden prompts
+src/repoforge/domain/         pure models, invariants, transitions, and typed errors
+src/repoforge/ports/          capability boundaries implemented by adapters or test fakes
+src/repoforge/adapters/       Git, filesystem, persistence, locking, audit, and runtime I/O
+src/repoforge/application/    orchestration, transactions, recovery, and workspace use cases
+src/repoforge/interfaces/     MCP, CLI, HTTP, and managed-runtime protocol adapters
+src/repoforge/bootstrap.py    dependency composition; no domain policy belongs here
+src/repoforge/config.py       TOML models, defaults, parsing, and validation
+tests/                        unit, concurrency, security, integration, CLI, and MCP contracts
+docs/                         architecture, operations, tools, testing, and implementation plans
 scripts/                      reproducible developer and operator commands
 ```
 
-Keep policy in the policy layer. Do not duplicate security decisions across tool handlers.
+Keep policy in domain/application boundaries and keep transport handlers thin. Raw persistence
+adapters must not expose a stronger atomicity guarantee than they implement.
+
+### State coordination hierarchy
+
+Acquire nested coordination in this order and never in reverse:
+
+```text
+runtime-global
+→ collection-maintenance (shared for record writes; exclusive for lifecycle work)
+→ workspace
+→ record
+→ artifact
+```
+
+Migration, cleanup, and recovery use the same exclusive collection-maintenance namespace. Ordinary
+record writes acquire the shared collection lock before the exclusive record lock. Audit sequence
+allocation, rotation, append, and prune share one sibling interprocess lock. Durable read APIs are
+side-effect free; reconciliation rereads under the corresponding writer lock before mutating state.
 
 ## Supported development environment
 

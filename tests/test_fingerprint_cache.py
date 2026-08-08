@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import pytest
 from conftest import TEST_CONFIG_GENERATION, create_forge_environment
 
 from repoforge.application.fingerprint_cache import read_fingerprint
@@ -66,6 +67,20 @@ def _service_with_counting_executor(tmp_path: Path) -> tuple[CodingService, Coun
         config_generation=TEST_CONFIG_GENERATION,
     )
     return CodingService(config, application=application), executor
+
+
+def test_fingerprint_persistence_decision_is_explicit(tmp_path: Path) -> None:
+    service, _ = _service_with_counting_executor(tmp_path)
+    created = service.workspace_create("demo", "fingerprint-explicit-persist")
+    context = service.application.context
+
+    with pytest.raises(TypeError):
+        read_fingerprint(  # type: ignore[call-arg]
+            context.fingerprint_cache,
+            created["workspace_id"],
+            context.git,
+            Path(created["path"]),
+        )
 
 
 def test_workspace_status_reuses_fingerprint_after_matching_validity_token(tmp_path: Path) -> None:

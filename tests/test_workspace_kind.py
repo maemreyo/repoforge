@@ -9,6 +9,8 @@ constructing the record directly, the same way an attach flow will eventually pr
 from __future__ import annotations
 
 import json
+import threading
+from pathlib import Path
 
 import pytest
 from conftest import ForgeEnvironment
@@ -16,6 +18,46 @@ from conftest import ForgeEnvironment
 from repoforge.adapters.persistence.json_workspace_store import JsonWorkspaceStore
 from repoforge.domain.errors import WorkspaceError
 from repoforge.domain.workspace import WorkspaceKind, WorkspaceRecord
+from repoforge.testing import InMemoryLockManager
+
+
+def test_workspace_update_serializes_concurrent_metadata_changes(tmp_path: Path) -> None:
+    locks = InMemoryLockManager()
+    first = JsonWorkspaceStore(tmp_path, locks)
+    second = JsonWorkspaceStore(tmp_path, locks)
+    first.save(
+        WorkspaceRecord(
+            "ws-1",
+            "demo",
+            "/tmp/ws-1",
+            "ai/task-1",
+            "main",
+            "origin",
+            "2026-01-01T00:00:00Z",
+        )
+    )
+    start = threading.Barrier(2)
+
+    def add_metadata(store: JsonWorkspaceStore, key: str) -> None:
+        start.wait(timeout=2.0)
+        store.update("ws-1", lambda record: record.metadata.__setitem__(key, True))
+
+    threads = (
+        threading.Thread(target=add_metadata, args=(first, "failure_evidence")),
+        threading.Thread(target=add_metadata, args=(second, "pr_intent")),
+    )
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert first.load("ws-1").metadata == {
+        "failure_evidence": True,
+        "pr_intent": True,
+    }
+    raw = json.loads((first.registry_dir / "ws-1.json").read_text(encoding="utf-8"))
+    assert raw["revision"] == 3
 
 
 def test_ordinary_create_is_managed_worktree(forge_env: ForgeEnvironment) -> None:
@@ -93,8 +135,6 @@ def test_attached_shared_workspace_removal_detaches_registry_only(
     assert result["local_branch_deleted"] is False
     with pytest.raises(WorkspaceError, match="Unknown workspace id"):
         forge_env.service.state.load(workspace_id)
-    from pathlib import Path
-
     assert Path(created["path"]).is_dir()
 
 

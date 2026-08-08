@@ -115,6 +115,11 @@ class FakeStore:
     def read_resolved_text(self) -> str:
         return self.resolved_text
 
+    def read_accepted_resolved_text(self) -> str:
+        if self._current is None:
+            raise ConfigError("No accepted configuration generation")
+        return self.resolved_text
+
     def accept(self, mutation: Any) -> ConfigGeneration:
         self.accepted.append(mutation)
         number = (self._current.generation if self._current else 0) + 1

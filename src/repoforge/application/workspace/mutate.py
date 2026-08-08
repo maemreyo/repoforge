@@ -584,14 +584,17 @@ class WorkspaceMutator:
                             workspace_id=command.workspace_id,
                         )
                         if result.changed:
-                            record.last_verification = None
-                            self.ctx.store.save(record)
+                            self.ctx.store.update(
+                                command.workspace_id,
+                                lambda fresh: setattr(fresh, "last_verification", None),
+                            )
                         return result
                 before_lookup = read_fingerprint(
                     self.ctx.fingerprint_cache,
                     command.workspace_id,
                     self.ctx.git,
                     workspace,
+                    persist=True,
                 )
                 if before_lookup.fingerprint != command.expected_workspace_fingerprint:
                     raise WorkspaceError(
@@ -788,8 +791,10 @@ class WorkspaceMutator:
                         self.ctx.git.change_metrics(workspace, repo),
                         receipt.transaction_id,
                     )
-                record.last_verification = None
-                self.ctx.store.save(record)
+                self.ctx.store.update(
+                    command.workspace_id,
+                    lambda fresh: setattr(fresh, "last_verification", None),
+                )
                 return committed_result
 
         return self.ctx.audited("workspace_mutate", audit_details, run)

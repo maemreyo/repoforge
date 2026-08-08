@@ -524,12 +524,14 @@ def test_runtime_store_persists_child_identity_degradation(
         child_process_identity="b" * 64,
     )
     store.write(record)
+    raw_before = (tmp_path / "runtime.json").read_bytes()
     identities.pop(101)
     degraded = store.read()
     assert degraded is not None and degraded.phase is RuntimePhase.DEGRADED
-    raw = json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8"))
-    assert raw["phase"] == "degraded"
-    assert raw["last_error_code"] == "CHILD_IDENTITY_MISMATCH"
+    assert degraded.child_pid is None
+    assert degraded.child_process_identity is None
+    assert degraded.last_error_code == "CHILD_IDENTITY_MISMATCH"
+    assert (tmp_path / "runtime.json").read_bytes() == raw_before
 
 
 def test_rendered_resolved_profile_keeps_working_directory() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -19,12 +20,28 @@ from typing import Any
 
 from ...domain.errors import ConfigError
 from ...domain.redaction import redact_text
+from ..filesystem.atomic import atomic_write_text
 
 _LOG_READ_LIMIT = 1_000_000
 _PROCESS_IDENTITY = re.compile(r"^[a-f0-9]{64}$")
 _SECRET_VALUE = re.compile(
     r"(?i)\b(control_plane_api_key|authorization|token|secret|password)\b(\s*[:=]\s*)([^\s]+)"
 )
+
+
+@contextmanager
+def _locked_state(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = path.with_name(f".{path.name}.lock")
+    descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 
 
 @dataclass(frozen=True)
@@ -77,7 +94,7 @@ def _read_process_identity(pid: int) -> str | None:
 
 
 def read_runtime_state(path: Path) -> RuntimeState | None:
-    """Return a live identity-validated runtime record, cleaning stale state."""
+    """Return a live identity-validated runtime record without mutating durable state."""
     if not path.is_file():
         return None
     try:
@@ -93,7 +110,6 @@ def read_runtime_state(path: Path) -> RuntimeState | None:
     process_identity = raw.get("process_identity", "")
     if process_identity == "":
         # PID-only records cannot distinguish a live process from a reused PID.
-        path.unlink(missing_ok=True)
         return None
     if (
         not isinstance(pid, int)
@@ -109,7 +125,6 @@ def read_runtime_state(path: Path) -> RuntimeState | None:
     ):
         raise ConfigError(f"Runtime state {path} is invalid")
     if _read_process_identity(pid) != process_identity:
-        path.unlink(missing_ok=True)
         return None
     return RuntimeState(
         pid=pid,
@@ -134,29 +149,37 @@ def write_runtime_state(path: Path, generation: int, tool_surface_hash: str = ""
         tool_surface_hash=tool_surface_hash,
         process_identity=process_identity,
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(state), sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.chmod(0o600)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    with _locked_state(path):
+        atomic_write_text(path, json.dumps(asdict(state), sort_keys=True) + "\n")
     return state
 
 
-def clear_runtime_state(path: Path, pid: int) -> None:
+def clear_runtime_state(
+    path: Path,
+    pid: int,
+    *,
+    expected_process_identity: str | None = None,
+) -> None:
     """Remove this process's state record without deleting a replacement's record."""
-    state = read_runtime_state(path)
-    if state is not None and state.pid == pid:
+    with _locked_state(path):
+        if not path.is_file():
+            return
+        try:
+            raw: Any = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return
+        if not isinstance(raw, dict) or raw.get("pid") != pid:
+            return
+        if (
+            expected_process_identity is not None
+            and raw.get("process_identity") != expected_process_identity
+        ):
+            return
         path.unlink(missing_ok=True)
 
 
 def read_managed_runtime(path: Path) -> ManagedRuntime | None:
-    """Return the validated managed tunnel process, cleaning stale state."""
+    """Return the validated managed tunnel process without mutating durable state."""
     if not path.is_file():
         return None
     try:
@@ -186,15 +209,12 @@ def read_managed_runtime(path: Path) -> ManagedRuntime | None:
         or not isinstance(identity, str)
         or not _PROCESS_IDENTITY.fullmatch(identity)
     ):
-        path.unlink(missing_ok=True)
         return None
     try:
         process_group = os.getpgid(pid)
     except (OSError, ProcessLookupError):
-        path.unlink(missing_ok=True)
         return None
     if process_group != pid or _read_process_identity(pid) != identity:
-        path.unlink(missing_ok=True)
         return None
     return ManagedRuntime(pid, generation, profile, executable, started_at, identity)
 
@@ -216,18 +236,26 @@ def write_managed_runtime(
         started_at=datetime.now(timezone.utc).isoformat(),
         process_identity=identity,
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(runtime), sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.chmod(0o600)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    with _locked_state(path):
+        atomic_write_text(path, json.dumps(asdict(runtime), sort_keys=True) + "\n")
     return runtime
+
+
+def _clear_managed_runtime_if_same(path: Path, runtime: ManagedRuntime) -> None:
+    with _locked_state(path):
+        if not path.is_file():
+            return
+        try:
+            raw: Any = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return
+        if not isinstance(raw, dict):
+            return
+        if (
+            raw.get("pid") == runtime.pid
+            and raw.get("process_identity") == runtime.process_identity
+        ):
+            path.unlink(missing_ok=True)
 
 
 def stop_managed_runtime(path: Path, timeout_seconds: int = 15) -> ManagedRuntime | None:
@@ -240,11 +268,12 @@ def stop_managed_runtime(path: Path, timeout_seconds: int = 15) -> ManagedRuntim
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if read_managed_runtime(path) is None:
+            _clear_managed_runtime_if_same(path, runtime)
             return runtime
         time.sleep(0.1)
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(runtime.pid, signal.SIGKILL)
-    path.unlink(missing_ok=True)
+    _clear_managed_runtime_if_same(path, runtime)
     return runtime
 
 

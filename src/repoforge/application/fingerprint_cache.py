@@ -92,7 +92,7 @@ def read_fingerprint(
     git: GitRepository,
     path: Path,
     *,
-    persist: bool = True,
+    persist: bool,
 ) -> FingerprintLookup:
     """Read the workspace fingerprint, caching it only when the caller holds the workspace lock.
 

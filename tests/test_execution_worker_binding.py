@@ -229,6 +229,32 @@ def test_quarantine_writes_the_receipt_before_the_move(
     assert receipt_existed_at_move == [True]
 
 
+def test_quarantine_uses_one_same_filesystem_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = JsonExecutionWorkerBindingStore(tmp_path / "state", InMemoryLockManager())
+    store.put(_binding())
+    module = __import__(
+        "repoforge.adapters.persistence.json_state_repository",
+        fromlist=["os"],
+    )
+    source = store._records._path(_WORKER_ID)
+    target = tmp_path / "state" / "runtime-execution-workers-quarantine" / f"{_WORKER_ID}.json"
+
+    def fail_replace(actual_source: Path, actual_target: Path) -> None:
+        assert actual_source == source
+        assert actual_target == target
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(module.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="simulated rename failure"):
+        store._records.move_to_quarantine(_WORKER_ID)
+
+    assert source.is_file()
+    assert not target.exists()
+
+
 def test_quarantine_move_failure_removes_the_receipt_and_keeps_the_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

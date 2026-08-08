@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -91,6 +92,74 @@ def test_json_state_repository_is_private_atomic_restart_safe_and_cas(
         store.save("demo-1", DemoRecord("lost"), expected_revision=Revision(1))
     assert stale.value.code is ErrorCode.STATE_STALE
     assert store.read("demo-1") == saved
+
+
+def test_record_mutation_acquires_collection_before_record_lock(tmp_path: Path) -> None:
+    class RecordingLocks(InMemoryLockManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.order: list[tuple[str, str]] = []
+
+        def shared_lock(self, name: str, **kwargs: object):
+            self.order.append(("shared", name))
+            return super().shared_lock(name, **kwargs)
+
+        def lock(self, name: str, **kwargs: object):
+            self.order.append(("exclusive", name))
+            return super().lock(name, **kwargs)
+
+    locks = RecordingLocks()
+    store = JsonStateRepository(
+        tmp_path,
+        collection="demo_records",
+        locks=locks,
+        codec=DemoCodec(),
+        id_validator=lambda value: value,
+    )
+    store.create("demo-1", DemoRecord("alpha"))
+    locks.order.clear()
+
+    store.save("demo-1", DemoRecord("beta"), expected_revision=Revision(1))
+
+    assert locks.order == [
+        ("shared", "state-lifecycle-demo_records"),
+        ("exclusive", "state-demo_records-demo-1"),
+    ]
+
+
+def test_record_mutation_waits_for_collection_maintenance_lock(tmp_path: Path) -> None:
+    locks = InMemoryLockManager()
+    store = JsonStateRepository(
+        tmp_path,
+        collection="demo_records",
+        locks=locks,
+        codec=DemoCodec(),
+        id_validator=lambda value: value,
+    )
+    store.create("demo-1", DemoRecord("alpha"))
+    completed = threading.Event()
+    failures: list[BaseException] = []
+
+    def save_record() -> None:
+        try:
+            store.save("demo-1", DemoRecord("beta"), expected_revision=Revision(1))
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            completed.set()
+
+    with locks.lock("state-lifecycle-demo_records"):
+        thread = threading.Thread(target=save_record)
+        thread.start()
+        thread.join(timeout=0.2)
+        assert not completed.is_set(), "record mutation bypassed collection maintenance"
+
+    thread.join(timeout=2.0)
+    assert completed.is_set()
+    assert failures == []
+    assert store.read("demo-1") == StateEnvelope(
+        "demo-1", SchemaVersion(1), Revision(2), DemoRecord("beta")
+    )
 
 
 def test_json_state_repository_rejects_corruption_future_schema_identity_and_size(

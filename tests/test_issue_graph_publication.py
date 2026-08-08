@@ -287,6 +287,21 @@ class _BarrierLockManager:
         return self._delegate.path_for(name)
 
     @contextmanager
+    def shared_lock(
+        self,
+        name: str,
+        *,
+        timeout_seconds: float | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> Iterator[None]:
+        with self._delegate.shared_lock(
+            name,
+            timeout_seconds=timeout_seconds,
+            metadata=metadata,
+        ):
+            yield
+
+    @contextmanager
     def lock(
         self,
         name: str,

@@ -55,6 +55,7 @@ class WorkspacePathsRestorer:
                     c.workspace_id,
                     self.ctx.git,
                     path,
+                    persist=True,
                 )
                 audit_details.update(
                     {

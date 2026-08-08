@@ -93,14 +93,22 @@ def test_runtime_store_round_trip_degrades_child_and_clears_stale_supervisor(
     assert store.read() == record
 
     identities.pop(11)
+    child_mismatch_bytes = path.read_bytes()
     degraded = store.read()
     assert degraded is not None
     assert degraded.phase is RuntimePhase.DEGRADED
     assert degraded.child_pid is None
     assert degraded.last_error_code == "CHILD_IDENTITY_MISMATCH"
+    assert path.read_bytes() == child_mismatch_bytes
+
+    assert store.reconcile() == degraded
+    assert store.read() == degraded
 
     identities.pop(10)
+    parent_mismatch_bytes = path.read_bytes()
     assert store.read() is None
+    assert path.read_bytes() == parent_mismatch_bytes
+    assert store.reconcile() is None
     assert not path.exists()
 
     path.write_text("[]", encoding="utf-8")
@@ -112,6 +120,26 @@ def test_runtime_store_round_trip_degrades_child_and_clears_stale_supervisor(
     path.write_text("{", encoding="utf-8")
     with pytest.raises(ConfigError, match="Invalid runtime state"):
         store.read()
+
+
+def test_runtime_reconcile_preserves_replacement_written_after_stale_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = importlib.import_module("repoforge.adapters.runtime.state_store")
+    identities = {10: "b" * 64}
+    monkeypatch.setattr(module, "process_identity", lambda pid: identities.get(pid))
+    store = JsonRuntimeStore(tmp_path / "runtime.json")
+    store.write(_record(pid=10))
+
+    identities.pop(10)
+    assert store.read() is None
+
+    replacement = _record(pid=20)
+    identities[20] = "b" * 64
+    store.write(replacement)
+
+    assert store.reconcile() == replacement
+    assert store.read() == replacement
 
 
 def test_runtime_store_clear_preserves_replacement(
