@@ -11,6 +11,7 @@ from typing import Any, Generic, TypeVar
 from ...domain.durable_state import Revision, StateCodec, StateEnvelope, StatePage
 from ...domain.errors import ErrorCode, RepoForgeError
 from ...ports.locking import LockManager
+from ..filesystem.atomic import fsync_dir
 from .json_state_file_store import AtomicJsonFileStore as AtomicJsonFileStore
 from .json_state_file_store import _state_error
 
@@ -346,10 +347,13 @@ class JsonStateRepository(Generic[T]):
         with self._files.locked(safe_id, operation="quarantine"):
             if not source.is_file():
                 return target
-            data = self._files.read_bytes(safe_id)
-            if data is None:
-                return target
-            target.write_bytes(data)
+            if target.is_file() and target.read_bytes() != source.read_bytes():
+                raise _state_error(
+                    f"Quarantine target already contains different bytes: {target}",
+                    ErrorCode.STATE_INVALID,
+                )
+            os.replace(source, target)
             os.chmod(target, 0o600)
-            source.unlink()
+            fsync_dir(source.parent)
+            fsync_dir(target.parent)
         return target

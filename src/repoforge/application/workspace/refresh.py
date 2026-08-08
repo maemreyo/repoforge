@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from ...domain.errors import ErrorCode, WorkspaceError
 from ...domain.policy import validate_workspace_branch
 from ...domain.workspace import (
+    WorkspaceRecord,
     WorkspaceRefreshBinding,
     invalidate_workspace_refresh_receipts,
     refresh_preview_target,
@@ -67,8 +68,7 @@ class WorkspaceRefresher:
 
         def operation() -> WorkspaceRefreshResult:
             with self.ctx.locks.lock(command.workspace_id):
-                stored = self.ctx.store.load(command.workspace_id)
-                record = replace(stored, metadata=dict(stored.metadata))
+                record = self.ctx.store.load(command.workspace_id)
                 validate_workspace_branch(record.kind, record.branch, repo)
                 if record.branch == record.base or record.branch in repo.protected_branches:
                     raise WorkspaceError("Protected or base branches cannot be refreshed")
@@ -171,17 +171,23 @@ class WorkspaceRefresher:
                     refresh_status = "refreshed"
                     identity_evidence = managed.evidence.safe_payload()
 
-                invalidated = invalidate_workspace_refresh_receipts(record)
-                record.metadata["workspace_base_sha"] = preview_target
-                record.metadata["last_refresh_target_sha"] = preview_target
-                record.metadata["last_refresh_at"] = self.ctx.clock.now_iso()
-                if new_head != old_head:
-                    record.metadata["refresh_commit_sha"] = new_head
+                invalidated: tuple[str, ...] = ()
+
+                def persist_refresh(fresh: WorkspaceRecord) -> None:
+                    nonlocal invalidated
+                    invalidated = invalidate_workspace_refresh_receipts(fresh)
+                    fresh.metadata["workspace_base_sha"] = preview_target
+                    fresh.metadata["last_refresh_target_sha"] = preview_target
+                    fresh.metadata["last_refresh_at"] = self.ctx.clock.now_iso()
+                    if new_head != old_head:
+                        fresh.metadata["refresh_commit_sha"] = new_head
+                    if identity_evidence is not None:
+                        fresh.metadata["last_commit_identity_evidence"] = identity_evidence
+
                 if identity_evidence is not None:
-                    record.metadata["last_commit_identity_evidence"] = identity_evidence
                     audit_details["commit_identity"] = identity_evidence
                 try:
-                    self.ctx.store.save(record)
+                    record = self.ctx.store.update(command.workspace_id, persist_refresh)
                 except Exception as exc:
                     if new_head != old_head:
                         try:

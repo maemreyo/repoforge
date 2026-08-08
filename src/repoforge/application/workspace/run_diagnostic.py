@@ -290,6 +290,7 @@ class WorkspaceDiagnosticRunner:
                     command.workspace_id,
                     self.ctx.git,
                     locked_workspace,
+                    persist=True,
                 )
                 before_fingerprint = before.fingerprint
                 head_sha = self.ctx.git.head_sha(locked_workspace)

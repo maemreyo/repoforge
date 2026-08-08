@@ -11,8 +11,8 @@ from __future__ import annotations
 import os
 import re
 import tempfile
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar
 
@@ -98,13 +98,22 @@ class AtomicJsonFileStore:
     def path(self, record_id: str) -> Path:
         return self.root / f"{self.record_id(record_id)}.json"
 
-    def locked(self, record_id: str, *, operation: str) -> AbstractContextManager[None]:
+    @contextmanager
+    def locked(self, record_id: str, *, operation: str) -> Iterator[None]:
         safe_id = self.record_id(record_id)
-        return self._locks.lock(
-            f"state-{self._collection}-{safe_id}",
-            timeout_seconds=5,
-            metadata={"operation": operation},
-        )
+        with (
+            self._locks.shared_lock(
+                f"state-lifecycle-{self._collection}",
+                timeout_seconds=5,
+                metadata={"operation": operation, "scope": "record_mutation"},
+            ),
+            self._locks.lock(
+                f"state-{self._collection}-{safe_id}",
+                timeout_seconds=5,
+                metadata={"operation": operation},
+            ),
+        ):
+            yield
 
     @staticmethod
     def _fsync_dir(path: Path) -> None:

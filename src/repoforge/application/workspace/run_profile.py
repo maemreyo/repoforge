@@ -391,7 +391,11 @@ class WorkspaceProfileRunner:
             fresh = self.ctx.store.load(c.workspace_id)
             run_started = time.monotonic()
             before = read_fingerprint(
-                self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, path
+                self.ctx.fingerprint_cache,
+                c.workspace_id,
+                self.ctx.git,
+                path,
+                persist=True,
             )
             before_fingerprint = before.fingerprint
             current_head_sha = self.ctx.git.head_sha(path).lower()

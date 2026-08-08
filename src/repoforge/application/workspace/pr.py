@@ -286,9 +286,13 @@ class WorkspacePrCoordinator:
                     snapshot_url=url,
                 )
             )
-        record.metadata["pr_issue_intents"] = [intent_payload(item) for item in intents]
-        record.metadata["pr_issue_intent_state"] = "accepted"
-        self.ctx.store.save(record)
+        payloads = [intent_payload(item) for item in intents]
+
+        def accept_intents(fresh: WorkspaceRecord) -> None:
+            fresh.metadata["pr_issue_intents"] = payloads
+            fresh.metadata["pr_issue_intent_state"] = "accepted"
+
+        self.ctx.store.update(record.workspace_id, accept_intents)
         return tuple(intents)
 
     def _mark_issue_intent_applied(
@@ -298,9 +302,10 @@ class WorkspacePrCoordinator:
     ) -> None:
         if not intents:
             return
-        record = self.ctx.store.load(workspace_id)
-        record.metadata["pr_issue_intent_state"] = "applied"
-        self.ctx.store.save(record)
+        self.ctx.store.update(
+            workspace_id,
+            lambda record: record.metadata.__setitem__("pr_issue_intent_state", "applied"),
+        )
 
     def execute(self, command: WorkspacePrCommand) -> WorkspacePrResult:
         if command.action not in _ACTIONS:

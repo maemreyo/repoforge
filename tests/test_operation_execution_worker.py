@@ -41,6 +41,7 @@ def test_profile_handler_reconstructs_exact_command_without_recursive_enqueue(tm
         workspace_id,
         application.context.git,
         workspace_path,
+        persist=False,
     ).fingerprint
     head_sha = application.context.git.head_sha(workspace_path)
     request = OperationWorkRequest.profile(
@@ -100,6 +101,7 @@ def test_adhoc_handler_reconstructs_reviewed_command_without_recursive_enqueue(t
         workspace_id,
         application.context.git,
         workspace_path,
+        persist=False,
     ).fingerprint
     request = OperationWorkRequest.adhoc(
         workspace_id=workspace_id,

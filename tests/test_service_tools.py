@@ -1103,6 +1103,49 @@ def test_commit_failure_reports_stage_and_invalidates_mutated_verified_tree(
     assert context.store.load(workspace_id).last_verification is None
 
 
+def test_workspace_commit_retry_repairs_registry_after_effect_failure(
+    forge_env: ForgeEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = forge_env.service
+    workspace_id = service.workspace_create("demo", "commit registry repair")["workspace_id"]
+    current = service.workspace_read_file(workspace_id, "hello.txt")
+    service.workspace_write_file(
+        workspace_id,
+        "hello.txt",
+        "changed before registry repair\n",
+        current["sha256"],
+    )
+    service.workspace_run_profile(workspace_id)
+    context = service.application.context
+    original_save = context.store.save
+    failed_once = False
+
+    def fail_once(record: object) -> None:
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise OSError("simulated registry failure after git commit")
+        original_save(record)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(context.store, "save", fail_once)
+
+    with pytest.raises(RepoForgeError) as failed:
+        service.workspace_commit(workspace_id, "Commit with repairable registry failure")
+
+    assert failed.value.code is ErrorCode.FAILED_AFTER_EFFECT
+    committed_head = context.git.head_sha(Path(context.store.load(workspace_id).path))
+    repaired = service.workspace_commit(
+        workspace_id,
+        "Commit with repairable registry failure",
+    )
+
+    assert repaired["head_sha"] == committed_head
+    assert repaired["committed"] is True
+    stored = context.store.load(workspace_id)
+    assert stored.metadata["verified_commit_sha"] == committed_head
+    assert stored.last_verification is None
+
+
 def test_workspace_push_uses_exact_publication_service_not_ambient_git(
     forge_env: ForgeEnvironment,
     monkeypatch: pytest.MonkeyPatch,

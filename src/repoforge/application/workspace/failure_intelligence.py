@@ -24,6 +24,7 @@ from ...domain.failure_intelligence import (
     failure_evidence_payload,
 )
 from ...domain.policy import normalize_relative_path
+from ...domain.workspace import WorkspaceRecord
 from ...ports.failure_evidence_store import FailureEvidenceStore
 from ..context import ApplicationContext
 
@@ -181,14 +182,18 @@ class FailureIntelligenceService:
     ) -> FailureEvidence:
         finalized = replace(evidence, receipt_id=receipt_id)
         stored = self._store().create(finalized)
-        record = self.ctx.store.load(workspace_id)
-        raw_ids = record.metadata.get("failure_evidence_ids", ())
-        identifiers = [str(item) for item in raw_ids] if isinstance(raw_ids, (list, tuple)) else []
-        identifiers = [item for item in identifiers if item != stored.failure_id]
-        identifiers.append(stored.failure_id)
-        record.metadata["failure_evidence_ids"] = identifiers[-20:]
-        record.metadata["last_failure_evidence_id"] = stored.failure_id
-        self.ctx.store.save(record)
+
+        def attach_failure(record: WorkspaceRecord) -> None:
+            raw_ids = record.metadata.get("failure_evidence_ids", ())
+            identifiers = (
+                [str(item) for item in raw_ids] if isinstance(raw_ids, (list, tuple)) else []
+            )
+            identifiers = [item for item in identifiers if item != stored.failure_id]
+            identifiers.append(stored.failure_id)
+            record.metadata["failure_evidence_ids"] = identifiers[-20:]
+            record.metadata["last_failure_evidence_id"] = stored.failure_id
+
+        self.ctx.store.update(workspace_id, attach_failure)
         return stored
 
     def read(self, command: FailureEvidenceReadCommand) -> dict[str, object]:

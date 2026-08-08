@@ -642,10 +642,12 @@ def test_a_fresh_supervisor_incarnation_still_reports_historical_restart_counts(
     )
 
     # Confirm the incident precondition: reading the live record from a fresh incarnation
-    # (pid 10 no longer live) really does self-heal to `None`, discarding restart history.
+    # (pid 10 no longer live) projects the stale record as absent without mutating durable
+    # state. Restart evidence remains available for explicit reconciliation/migration.
+    runtime_bytes = runtime_path.read_bytes()
     assert store.read() is None
-    assert not runtime_path.exists()
-    # The ledger is untouched by that self-heal -- a different file, a different check.
+    assert runtime_path.read_bytes() == runtime_bytes
+    # The ledger is also untouched by observation -- a different file, a different check.
     assert restart_history.read() is not None
     assert restart_history.read().restarts_total == 3
 

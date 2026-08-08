@@ -110,7 +110,6 @@ def execute_idempotent(
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     correlation = ctx.ids.new_hex(24)
-    lock_name = f"idempotency-{action}-{key_hash[:24]}"
     record_details = {
         **(details or {}),
         "idempotency_key_hash": key_hash[:16],
@@ -192,8 +191,9 @@ def execute_idempotent(
         return safe_result
 
     try:
-        with ctx.locks.lock(
-            lock_name,
+        with store.transaction(
+            action,
+            key_hash,
             timeout_seconds=ctx.config.server.idempotency_lock_timeout_seconds,
             metadata={"action": action, "correlation_id": correlation},
         ):

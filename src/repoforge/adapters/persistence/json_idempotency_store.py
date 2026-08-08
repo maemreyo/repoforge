@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -12,14 +14,17 @@ from typing import Any
 from ...domain.errors import ConfigError, ErrorCode
 from ...domain.operations import IdempotencyRecord, IdempotencyState
 from ...domain.redaction import sanitize_persisted_data
+from ...ports.locking import LockManager
+from ..locking.fcntl import FcntlLockManager
 
 _SAFE_ACTION = re.compile(r"^[a-z][a-z0-9_]{1,79}$")
 _SAFE_HASH = re.compile(r"^[a-f0-9]{64}$")
 
 
 class JsonIdempotencyStore:
-    def __init__(self, state_root: Path):
+    def __init__(self, state_root: Path, locks: LockManager | None = None):
         self.root = state_root / "idempotency"
+        self._locks = locks or FcntlLockManager(state_root / "locks")
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.root, 0o700)
 
@@ -52,6 +57,23 @@ class JsonIdempotencyStore:
         if not _SAFE_ACTION.fullmatch(action) or not _SAFE_HASH.fullmatch(key_hash):
             raise ConfigError("Invalid idempotency record identity")
         return self.root / f"{action}-{key_hash}.json"
+
+    @contextmanager
+    def transaction(
+        self,
+        action: str,
+        key_hash: str,
+        *,
+        timeout_seconds: float,
+        metadata: dict[str, str] | None = None,
+    ) -> Iterator[None]:
+        self._path(action, key_hash)
+        with self._locks.lock(
+            f"idempotency-{action}-{key_hash[:24]}",
+            timeout_seconds=timeout_seconds,
+            metadata=metadata,
+        ):
+            yield
 
     def load(self, action: str, key_hash: str) -> IdempotencyRecord | None:
         path = self._path(action, key_hash)

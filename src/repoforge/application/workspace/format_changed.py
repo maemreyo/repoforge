@@ -92,6 +92,7 @@ class WorkspaceChangedFormatter:
                     command.workspace_id,
                     self.ctx.git,
                     workspace,
+                    persist=True,
                 ).fingerprint
                 if command.expected_fingerprint != before:
                     raise RepoForgeError(

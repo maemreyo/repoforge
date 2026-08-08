@@ -16,4 +16,12 @@ class LockManager(Protocol):
         metadata: dict[str, str] | None = None,
     ) -> AbstractContextManager[None]: ...
 
+    def shared_lock(
+        self,
+        name: str,
+        *,
+        timeout_seconds: float | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> AbstractContextManager[None]: ...
+
     def path_for(self, name: str) -> Path: ...

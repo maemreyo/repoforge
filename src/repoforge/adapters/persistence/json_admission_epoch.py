@@ -2,40 +2,28 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
 import secrets
-import tempfile
 from pathlib import Path
 
 from ...domain.errors import ConfigError
 from ...ports.admission_epoch import ADMISSION_CLOSING, ADMISSION_OPEN
+from ...ports.locking import LockManager
+from ..filesystem.atomic import atomic_write_text
+from ..locking.fcntl import FcntlLockManager
 
 _EPOCH_FILE = "runtime-admission-epoch.json"
 _INITIAL_EPOCH = 1
-
-
-def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, sort_keys=True, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+_STORE_LOCK = "worker-admission-epoch-store"
 
 
 class JsonAdmissionEpochStore:
-    """Durable admission epoch in one JSON file under the state root."""
+    """Durable admission epoch with atomic store-level read-modify-write."""
 
-    def __init__(self, state_root: Path) -> None:
-        self._path = Path(state_root) / _EPOCH_FILE
+    def __init__(self, state_root: Path, locks: LockManager | None = None) -> None:
+        root = Path(state_root)
+        self._path = root / _EPOCH_FILE
+        self._locks = locks or FcntlLockManager(root / "locks")
 
     def read(self) -> tuple[int, str]:
         return self._read_all()[:2]
@@ -46,8 +34,6 @@ class JsonAdmissionEpochStore:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            # An unreadable fence must fail closed, not silently reopen: a restarter
-            # that cannot prove admission is open must refuse to stop the incumbent.
             raise ConfigError(
                 f"ADMISSION_EPOCH_UNREADABLE: cannot read the worker-admission epoch "
                 f"{self._path}: {exc}"
@@ -69,55 +55,64 @@ class JsonAdmissionEpochStore:
         return epoch, str(state), permit
 
     def open_next(self) -> int:
-        current, _state = self.read()
-        next_epoch = current + 1
-        self._write(next_epoch, ADMISSION_OPEN, permit=None)
-        return next_epoch
+        with self._locks.lock(
+            _STORE_LOCK,
+            timeout_seconds=5,
+            metadata={"operation": "admission_open_next"},
+        ):
+            current, _state, _permit = self._read_all()
+            next_epoch = current + 1
+            self._write(next_epoch, ADMISSION_OPEN, permit=None)
+            return next_epoch
 
     def close(self) -> int:
-        current, _state = self.read()
-        # A new handoff starts with an empty permit slot: a stale permit from a
-        # previous handoff must never be claimable in this one (F-012).
-        self._write(current, ADMISSION_CLOSING, permit=None)
-        return current
+        with self._locks.lock(
+            _STORE_LOCK,
+            timeout_seconds=5,
+            metadata={"operation": "admission_close"},
+        ):
+            current, _state, _permit = self._read_all()
+            self._write(current, ADMISSION_CLOSING, permit=None)
+            return current
 
     def issue_permit(self, *, target: str | None) -> str:
-        """Issue a single-use replacement permit for the current epoch (F-012).
-
-        Rotates the slot: writing a new permit atomically invalidates any previous
-        handoff's permit, so a failed candidate's permit can never be reused by a
-        rollback -- the rollback must issue its own, bound to its own target.
-        """
-        current, state = self.read()
-        token = secrets.token_urlsafe(24)
-        self._write(
-            current,
-            state,
-            permit={
-                "epoch": current,
-                "token": token,
-                "target": target,
-                "used": False,
-            },
-        )
-        return token
+        with self._locks.lock(
+            _STORE_LOCK,
+            timeout_seconds=5,
+            metadata={"operation": "admission_issue_permit"},
+        ):
+            current, state, _permit = self._read_all()
+            token = secrets.token_urlsafe(32)
+            self._write(
+                current,
+                state,
+                permit={
+                    "epoch": current,
+                    "token": token,
+                    "target": target,
+                    "used": False,
+                },
+            )
+            return token
 
     def claim_permit(self, epoch: int, *, token: str, target: str | None) -> bool:
-        """Atomically claim the current epoch's permit (F-012); False on any mismatch."""
-        current, state, permit = self._read_all()
-        if state != ADMISSION_CLOSING or current != epoch:
-            return False
-        if not isinstance(permit, dict) or permit.get("epoch") != epoch:
-            return False
-        if permit.get("used"):
-            return False
-        if permit.get("token") != token:
-            return False
-        bound_target = permit.get("target")
-        if bound_target is not None and bound_target != target:
-            return False
-        self._write(current, state, permit={**permit, "used": True})
-        return True
+        with self._locks.lock(
+            _STORE_LOCK,
+            timeout_seconds=5,
+            metadata={"operation": "admission_claim_permit"},
+        ):
+            current, state, permit = self._read_all()
+            if state != ADMISSION_CLOSING or current != epoch:
+                return False
+            if not isinstance(permit, dict) or permit.get("epoch") != epoch:
+                return False
+            if permit.get("used") or permit.get("token") != token:
+                return False
+            bound_target = permit.get("target")
+            if bound_target is not None and bound_target != target:
+                return False
+            self._write(current, state, permit={**permit, "used": True})
+            return True
 
     def _write(
         self,
@@ -129,4 +124,7 @@ class JsonAdmissionEpochStore:
         payload: dict[str, object] = {"epoch": epoch, "state": state}
         if permit is not None:
             payload["permit"] = permit
-        _atomic_write_json(self._path, payload)
+        atomic_write_text(
+            self._path,
+            json.dumps(payload, sort_keys=True, indent=2) + "\n",
+        )

@@ -735,8 +735,9 @@ class JsonStateLifecycleManager:
             if journal.get("phase") not in {"prepared", "applying"}:
                 continue
             plan_id = self._record_id(str(journal.get("plan_id")))
+            collection = validate_state_collection(str(journal.get("collection")))
             with self._locks.lock(
-                f"state-lifecycle-recovery-{plan_id}",
+                f"state-lifecycle-{collection}",
                 timeout_seconds=10,
                 metadata={"operation": "recover", "plan_id": plan_id},
             ):
@@ -1024,7 +1025,7 @@ class JsonStateLifecycleManager:
                 return report
 
         with self._locks.lock(
-            f"state-cleanup-{preview.collection}",
+            f"state-lifecycle-{preview.collection}",
             timeout_seconds=10,
             metadata={"operation": "cleanup", "plan_id": preview.plan_id},
         ):

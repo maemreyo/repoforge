@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -13,14 +14,35 @@ from conftest import ForgeEnvironment
 
 import repoforge.application.workspace.file_write as file_write_module
 from repoforge.adapters.locking import FcntlLockManager
-from repoforge.adapters.persistence import JsonExternalMutationLedger
+from repoforge.adapters.persistence import JsonExternalMutationLedger, JsonIdempotencyStore
 from repoforge.domain.errors import ConfigError, ErrorCode
+from repoforge.testing import InMemoryLockManager
 
 
 def _audit_events(root: Path, action: str) -> list[dict[str, object]]:
     path = root / "state" / "audit.jsonl"
     events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
     return [event for event in events if event["action"] == action]
+
+
+def test_idempotency_store_transaction_serializes_the_key(tmp_path: Path) -> None:
+    locks = InMemoryLockManager()
+    first = JsonIdempotencyStore(tmp_path / "state", locks)
+    second = JsonIdempotencyStore(tmp_path / "state", locks)
+    entered = threading.Event()
+
+    def contend() -> None:
+        with second.transaction("workspace_push", "a" * 64, timeout_seconds=2.0):
+            entered.set()
+
+    with first.transaction("workspace_push", "a" * 64, timeout_seconds=2.0):
+        thread = threading.Thread(target=contend)
+        thread.start()
+        thread.join(timeout=0.2)
+        assert not entered.is_set()
+
+    thread.join(timeout=2.0)
+    assert entered.is_set()
 
 
 def test_external_mutation_ledger_reserves_once_and_enforces_window(tmp_path: Path) -> None:

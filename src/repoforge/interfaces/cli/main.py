@@ -1036,7 +1036,7 @@ def _repo_refresh(args: argparse.Namespace) -> int:
         source.auth_profiles,
     )
     source_text = render_source(updated_source)
-    document = parse_resolved(store.read_resolved_text())
+    document = parse_resolved(store.read_accepted_resolved_text())
     document = apply_auth_profiles(document, updated_source.auth_profiles)
     fingerprint_map = current.repository_fingerprint_map()
     patch_by_id = {item.repo_id: item.policy_patch for item in source.repositories}
@@ -1058,7 +1058,7 @@ def _repo_refresh(args: argparse.Namespace) -> int:
         proposal_id=proposal_id,
         fingerprints=fingerprints,
     )
-    delta = classify_capability_delta(store.read_resolved_text(), candidate)
+    delta = classify_capability_delta(store.read_accepted_resolved_text(), candidate)
     if not args.accept:
         _json(
             {
@@ -1290,7 +1290,7 @@ def _repo_enroll(args: argparse.Namespace) -> int:
         ),
     )
     source_text = render_source(source)
-    document = apply_proposal(parse_resolved(store.read_resolved_text()), proposal)
+    document = apply_proposal(parse_resolved(store.read_accepted_resolved_text()), proposal)
     fingerprints = (
         tuple(
             sorted(
@@ -1352,7 +1352,7 @@ def _repo_remove(args: argparse.Namespace) -> int:
         raise ConfigError("No accepted generation")
     source = remove_source_repository(parse_source(store.read_source_text()), args.repo_id)
     source_text = render_source(source)
-    document = remove_repository(parse_resolved(store.read_resolved_text()), args.repo_id)
+    document = remove_repository(parse_resolved(store.read_accepted_resolved_text()), args.repo_id)
     fingerprints = tuple(
         item for item in current.repository_fingerprints if item[0] != args.repo_id
     )
@@ -2341,7 +2341,17 @@ def _serve(config_path: Path, connector_identity: str = "forge_v2") -> int:
         router.close(timeout_seconds=30.0)
         control.close()
         latest_state = state_holder.get("state", state)
-        clear_runtime_state(runtime_state_path, int(getattr(latest_state, "pid", state.pid)))
+        initial_identity = getattr(state, "process_identity", None)
+        latest_identity = getattr(latest_state, "process_identity", initial_identity)
+        latest_pid = int(getattr(latest_state, "pid", state.pid))
+        if latest_identity is None:
+            clear_runtime_state(runtime_state_path, latest_pid)
+        else:
+            clear_runtime_state(
+                runtime_state_path,
+                latest_pid,
+                expected_process_identity=str(latest_identity),
+            )
     return 0
 
 

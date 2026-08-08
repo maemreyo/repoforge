@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from repoforge.application.workspace.refresh_v2 import WorkspaceRefreshV2
 from repoforge.contracts.registry import V2_TOOL_SPECS
 from repoforge.domain.errors import SecurityError, WorkspaceError
 from repoforge.domain.generated_paths import GeneratedPathRule, valid_regenerated_paths
+from repoforge.domain.workspace import WorkspaceRecord
 
 
 def _clone_publisher(env: ForgeEnvironment, name: str = "publisher") -> Path:
@@ -1276,15 +1278,20 @@ def test_v2_refresh_registry_failure_restores_exact_reviewed_state(
         expected_head_sha=str(before["head_sha"]),
         expected_fingerprint=str(before["workspace_fingerprint"]),
     )
-    original_save = service.state.save
+    original_update = service.state.update
 
-    def fail_refresh_save(record: object) -> None:
-        metadata = getattr(record, "metadata", {})
-        if isinstance(metadata, dict) and "last_refresh_target_sha" in metadata:
-            raise OSError("simulated registry failure")
-        original_save(record)  # type: ignore[arg-type]
+    def fail_refresh_update(
+        target_workspace_id: str,
+        updater: Callable[[WorkspaceRecord], None],
+    ) -> WorkspaceRecord:
+        def fail_after_update(record: WorkspaceRecord) -> None:
+            updater(record)
+            if "last_refresh_target_sha" in record.metadata:
+                raise OSError("simulated registry failure")
 
-    monkeypatch.setattr(service.state, "save", fail_refresh_save)
+        return original_update(target_workspace_id, fail_after_update)
+
+    monkeypatch.setattr(service.state, "update", fail_refresh_update)
     with pytest.raises(WorkspaceError, match="reviewed Git and registry state was restored"):
         service.workspace_refresh_v2(
             workspace_id,
@@ -1624,10 +1631,13 @@ def test_refresh_rolls_back_when_registry_save_fails_and_audits_failure(
         str(before["workspace_fingerprint"]),
     )
 
-    def fail_save(_record: object) -> None:
+    def fail_update(
+        _workspace_id: str,
+        _updater: Callable[[WorkspaceRecord], None],
+    ) -> WorkspaceRecord:
         raise OSError("simulated registry failure")
 
-    monkeypatch.setattr(service.state, "save", fail_save)
+    monkeypatch.setattr(service.state, "update", fail_update)
     with pytest.raises(WorkspaceError, match="registry update failed; Git state was restored"):
         service.workspace_refresh(
             workspace_id,

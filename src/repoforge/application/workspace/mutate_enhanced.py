@@ -574,6 +574,7 @@ class WorkspaceMutator:
 
         def run() -> WorkspaceMutateResult:
             with self.ctx.locks.lock(command.workspace_id):
+                current_record = self.ctx.store.load(command.workspace_id)
                 engine = open_file_transaction(self.ctx, workspace)
                 recovery = engine.recover_pending()
                 audit_details["recovered_rolled_back"] = recovery.rolled_back
@@ -589,14 +590,17 @@ class WorkspaceMutator:
                             workspace_id=command.workspace_id,
                         )
                         if result.changed:
-                            record.last_verification = None
-                            self.ctx.store.save(record)
+                            self.ctx.store.update(
+                                command.workspace_id,
+                                lambda fresh: setattr(fresh, "last_verification", None),
+                            )
                         return result
                 before_lookup = read_fingerprint(
                     self.ctx.fingerprint_cache,
                     command.workspace_id,
                     self.ctx.git,
                     workspace,
+                    persist=True,
                 )
                 head_sha = self.ctx.git.head_sha(workspace)
                 fingerprint_drifted = (
@@ -606,7 +610,7 @@ class WorkspaceMutator:
                     command.expected_head_sha is not None and command.expected_head_sha != head_sha
                 )
                 concurrent_observation: dict[str, object] | None = None
-                if record.kind.consistency_mode is ConsistencyMode.SHARED:
+                if current_record.kind.consistency_mode is ConsistencyMode.SHARED:
                     # Exact-state preconditions become an observation, not a refusal: the
                     # whole point of a shared-consistency workspace is that the operator's
                     # editor (or anything else) may be touching these files right now.
@@ -640,7 +644,7 @@ class WorkspaceMutator:
                 freshness_preflight = freshness_preflight_payload(
                     collect_workspace_base_status(
                         self.ctx,
-                        record,
+                        current_record,
                         repo,
                         workspace,
                         fetch_remote=True,
@@ -866,8 +870,10 @@ class WorkspaceMutator:
                         freshness_preflight,
                         concurrent_observation,
                     )
-                record.last_verification = None
-                self.ctx.store.save(record)
+                self.ctx.store.update(
+                    command.workspace_id,
+                    lambda fresh: setattr(fresh, "last_verification", None),
+                )
                 return committed_result
 
         if command.dry_run:

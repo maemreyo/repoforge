@@ -1221,7 +1221,7 @@ def build_admission_epoch_store(state_root: Path) -> AdmissionEpochStore:
     """The durable worker-admission epoch shared by registrar and restarter (P1-3)."""
     from .adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
 
-    return JsonAdmissionEpochStore(state_root)
+    return JsonAdmissionEpochStore(state_root, build_lock_manager(state_root))
 
 
 def build_worker_registrar(state_root: Path) -> WorkerRegistrar:
@@ -1235,16 +1235,17 @@ def build_worker_registrar(state_root: Path) -> WorkerRegistrar:
     from .adapters.persistence.json_admission_epoch import JsonAdmissionEpochStore
     from .adapters.persistence.json_process_lease_adapter import JsonProcessLeaseAdapter
 
+    locks = build_lock_manager(state_root)
     return WorkerRegistrar(
-        leases=JsonProcessLeaseAdapter(state_root, build_lock_manager(state_root)),
+        leases=JsonProcessLeaseAdapter(state_root, locks),
         ids=id_generator(),
         clock=system_clock(),
         shadow=build_lease_shadow_store(state_root),
-        epochs=JsonAdmissionEpochStore(state_root),
+        epochs=JsonAdmissionEpochStore(state_root, locks),
         # P1-3: the same lock manager the restarter receives, so the registrar's
         # OPEN check + intent create and the restarter's fence -> stop are
         # mutually exclusive across processes.
-        locks=build_lock_manager(state_root),
+        locks=locks,
     )
 
 
@@ -1538,7 +1539,7 @@ def build_metrics_sink(
 
 
 def build_idempotency_store(state_root: Path) -> IdempotencyStore:
-    return JsonIdempotencyStore(state_root)
+    return JsonIdempotencyStore(state_root, build_lock_manager(state_root))
 
 
 def build_operation_store(
@@ -1663,8 +1664,8 @@ def build_application(
         max_artifact_bytes=config.server.max_file_bytes,
     )
     execution = ExecutionCoordinator(execution_environment)
-    store = o.store or JsonWorkspaceStore(config.server.state_root)
     locks = o.locks or FcntlLockManager(config.server.state_root / "locks")
+    store = o.store or JsonWorkspaceStore(config.server.state_root, locks)
     gate = o.gate or InProcessOperationGate()
     audit = o.audit or JsonlAuditSink(
         config.server.state_root,
@@ -1856,7 +1857,7 @@ def build_application(
             except Exception:
                 pass
     metrics = o.metrics or JsonMetricsSink(config.server.state_root, locks, clock)
-    idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root)
+    idempotency = o.idempotency or JsonIdempotencyStore(config.server.state_root, locks)
     execution_plans = o.execution_plans or JsonExecutionPlanStore(config.server.state_root, locks)
     execution_plan_acceptances = o.execution_plan_acceptances or JsonExecutionPlanAcceptanceStore(
         config.server.state_root, locks

@@ -7,7 +7,7 @@ from ...domain.auth_profile import AuthProfileSelector
 from ...domain.command_source import dirty_command_source_paths
 from ...domain.errors import ErrorCode, RepoForgeError, WorkspaceError
 from ...domain.publishing import validate_commit_message
-from ...domain.workspace import WorkspaceKind
+from ...domain.workspace import WorkspaceKind, WorkspaceRecord
 from ..context import ApplicationContext
 from ..execution.requests import profile_execution_request
 from ..idempotency import IdempotencyEffectBoundary
@@ -50,6 +50,68 @@ def _all_command_source_paths(repo: RepositoryConfig) -> tuple[str, ...]:
 class WorkspaceCommitter:
     def __init__(self, ctx: ApplicationContext):
         self.ctx = ctx
+
+    def _reconcile_failed_after_effect_commit(
+        self,
+        *,
+        record: WorkspaceRecord,
+        repo: RepositoryConfig,
+        current_head: str,
+        boundary: IdempotencyEffectBoundary,
+    ) -> tuple[WorkspaceCommitResult, str] | None:
+        operations = self.ctx.operation_store
+        results = self.ctx.operation_result_store
+        if operations is None or results is None:
+            return None
+        page = operations.list_records(max_records=2_000)
+        candidates = sorted(page.records, key=lambda item: item.updated_at, reverse=True)
+        for task in candidates:
+            if (
+                task.kind != "workspace_commit"
+                or task.workspace_id != record.workspace_id
+                or task.state.value != "failed"
+                or task.error_code != ErrorCode.FAILED_AFTER_EFFECT.value
+                or task.result_reference is None
+            ):
+                continue
+            payload = results.read(task.operation_id)
+            if payload is None:
+                continue
+            try:
+                result = WorkspaceCommitResult(**payload)
+            except TypeError:
+                continue
+            if (
+                result.workspace_id != record.workspace_id
+                or result.branch != record.branch
+                or result.head_sha != current_head
+                or result.committed is not True
+            ):
+                continue
+            if repo.require_verification_before_commit:
+                verification = record.last_verification
+                if (
+                    verification is None
+                    or result.verified_profile != verification.profile
+                    or result.verification_fingerprint != verification.fingerprint
+                ):
+                    continue
+                record.metadata.update(
+                    {
+                        "verified_commit_sha": current_head,
+                        "verification_profile": verification.profile,
+                        "verification_completed_at": verification.completed_at,
+                    }
+                )
+            record.metadata.pop("refresh_commit_sha", None)
+            record.metadata["last_commit_reconciled_operation_id"] = task.operation_id
+            record.metadata["last_commit_reconciled_at"] = self.ctx.clock.now_iso()
+            record.last_verification = None
+            boundary.begin()
+            boundary.record_result(result)
+            self.ctx.store.save(record)
+            return result, task.operation_id
+        return None
 
     def execute(self, c: WorkspaceCommitCommand) -> WorkspaceCommitResult:
         record, repo, path = self.ctx.workspace(c.workspace_id)
@@ -122,6 +184,16 @@ class WorkspaceCommitter:
                     )
                 controlled_refresh = fresh.metadata.get("refresh_commit_sha") == current_head
                 if not dirty and not controlled_refresh:
+                    reconciled = self._reconcile_failed_after_effect_commit(
+                        record=fresh,
+                        repo=repo,
+                        current_head=current_head,
+                        boundary=boundary,
+                    )
+                    if reconciled is not None:
+                        result, source_operation_id = reconciled
+                        audit_details["reconciled_commit_operation_id"] = source_operation_id
+                        return result
                     raise WorkspaceError("There are no changes to commit")
                 if repo.require_verification_before_commit:
                     if not fresh.last_verification:

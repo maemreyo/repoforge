@@ -41,7 +41,7 @@ def test_runtime_state_records_the_current_process_and_generation(tmp_path: Path
     assert state.tool_surface_hash == "surface"
 
 
-def test_runtime_state_ignores_and_removes_a_dead_process_record(tmp_path: Path) -> None:
+def test_runtime_state_ignores_a_dead_process_record_without_mutating_it(tmp_path: Path) -> None:
     # Given: a state file for a process that cannot exist.
     state_path = tmp_path / "runtime.json"
     state_path.write_text(
@@ -56,12 +56,14 @@ def test_runtime_state_ignores_and_removes_a_dead_process_record(tmp_path: Path)
         encoding="utf-8",
     )
 
+    original = state_path.read_bytes()
+
     # When: runtime status is read.
     state = read_runtime_state(state_path)
 
-    # Then: it is considered stopped and the stale record is removed.
+    # Then: it is considered stopped, but observation does not mutate durable state.
     assert state is None
-    assert not state_path.exists()
+    assert state_path.read_bytes() == original
 
 
 def test_runtime_state_rejects_a_reused_pid_with_another_identity(tmp_path: Path) -> None:
@@ -79,12 +81,14 @@ def test_runtime_state_rejects_a_reused_pid_with_another_identity(tmp_path: Path
         encoding="utf-8",
     )
 
+    original = state_path.read_bytes()
+
     # When: runtime status validates the persisted process identity.
     state = read_runtime_state(state_path)
 
-    # Then: PID reuse or forged state cannot impersonate the MCP runtime.
+    # Then: PID reuse cannot impersonate the runtime, and reads remain side-effect free.
     assert state is None
-    assert not state_path.exists()
+    assert state_path.read_bytes() == original
 
 
 def test_runtime_state_discards_legacy_pid_only_record(tmp_path: Path) -> None:
@@ -95,12 +99,14 @@ def test_runtime_state_discards_legacy_pid_only_record(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    original = state_path.read_bytes()
+
     # When: the upgraded runtime reads the PID-only record.
     state = read_runtime_state(state_path)
 
-    # Then: it fails closed until the live process republishes identity-bound state.
+    # Then: it fails closed without deleting state from an observational read.
     assert state is None
-    assert not state_path.exists()
+    assert state_path.read_bytes() == original
 
 
 def test_runtime_state_cleanup_preserves_a_replacement_record(tmp_path: Path) -> None:

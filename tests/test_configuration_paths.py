@@ -6,9 +6,22 @@ from pathlib import Path
 
 import pytest
 
+from repoforge.adapters.configuration.generation_store import ConfigGenerationStore
 from repoforge.application.configuration.paths import resolve_repoforge_paths
+from repoforge.testing import InMemoryLockManager
 
 cli = importlib.import_module("repoforge.interfaces.cli.main")
+
+
+def test_resolved_config_read_requires_explicit_authority(tmp_path: Path) -> None:
+    store = ConfigGenerationStore(
+        tmp_path / "config.toml",
+        tmp_path / "state",
+        InMemoryLockManager(),
+    )
+
+    with pytest.raises(TypeError):
+        store.read_resolved_text()  # type: ignore[call-arg]
 
 
 def test_resolve_repoforge_paths_is_absolute_deterministic_and_read_only(tmp_path: Path) -> None:

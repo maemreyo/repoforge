@@ -456,7 +456,11 @@ class WorkspaceAdhocRunner:
                 fresh, locked_repo, locked_workspace = self.ctx.workspace(c.workspace_id)
                 before_paths = self.ctx.git.changed_paths(locked_workspace, locked_repo)
                 before = read_fingerprint(
-                    self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, locked_workspace
+                    self.ctx.fingerprint_cache,
+                    c.workspace_id,
+                    self.ctx.git,
+                    locked_workspace,
+                    persist=True,
                 )
                 before_fingerprint = before.fingerprint
                 head_before = self.ctx.git.head_sha(locked_workspace)
@@ -700,7 +704,11 @@ class WorkspaceAdhocRunner:
                 fresh, locked_repo, locked_workspace = self.ctx.workspace(c.workspace_id)
                 before_paths = self.ctx.git.changed_paths(locked_workspace, locked_repo)
                 before = read_fingerprint(
-                    self.ctx.fingerprint_cache, c.workspace_id, self.ctx.git, locked_workspace
+                    self.ctx.fingerprint_cache,
+                    c.workspace_id,
+                    self.ctx.git,
+                    locked_workspace,
+                    persist=True,
                 )
                 before_fingerprint = before.fingerprint
                 head_before = self.ctx.git.head_sha(locked_workspace)

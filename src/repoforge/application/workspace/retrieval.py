@@ -118,6 +118,7 @@ class WorkspaceRetrieval:
             workspace_id,
             self.ctx.git,
             workspace,
+            persist=False,
         ).fingerprint
         return self.ctx.git.head_sha(workspace), fingerprint
 

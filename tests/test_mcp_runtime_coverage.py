@@ -50,6 +50,33 @@ def test_runtime_dispatch_forwards_workspace_diff_detail_mode() -> None:
     assert _dispatch_kwargs("workspace_diff", model)["include_hunks"] is True
 
 
+def test_local_runtime_writers_use_shared_atomic_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = __import__("repoforge.adapters.runtime.local_runtime", fromlist=["atomic_write_text"])
+    writes: list[tuple[Path, str]] = []
+
+    def capture(path: Path, text: str, **_kwargs: object) -> None:
+        writes.append((path, text))
+
+    monkeypatch.setattr(module, "atomic_write_text", capture, raising=False)
+    monkeypatch.setattr(module, "_read_process_identity", lambda _pid: "a" * 64)
+
+    runtime_path = tmp_path / "runtime.json"
+    managed_path = tmp_path / "managed.json"
+    write_runtime_state(runtime_path, 3, "surface")
+    write_managed_runtime(
+        managed_path,
+        pid=123,
+        generation=4,
+        profile="repoforge",
+        executable="python",
+    )
+
+    assert [path for path, _text in writes] == [runtime_path, managed_path]
+    assert all(text.endswith("\n") for _path, text in writes)
+
+
 def test_runtime_state_lifecycle_and_validation(tmp_path: Path) -> None:
     path = tmp_path / "runtime.json"
     assert read_runtime_state(path) is None
@@ -69,7 +96,9 @@ def test_runtime_state_lifecycle_and_validation(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="Cannot read runtime state"):
         read_runtime_state(path)
     path.write_text(json.dumps({"pid": os.getpid(), "active_generation": 1, "started_at": "now"}))
-    assert read_runtime_state(path) is None and not path.exists()
+    stale_runtime_bytes = path.read_bytes()
+    assert read_runtime_state(path) is None
+    assert path.read_bytes() == stale_runtime_bytes
     path.write_text(
         json.dumps(
             {"pid": -1, "active_generation": 1, "started_at": "now", "process_identity": "x" * 64}
@@ -115,7 +144,9 @@ def test_managed_runtime_lifecycle_and_start_lock(tmp_path: Path) -> None:
             process.wait()
 
     state_path.write_text("{}", encoding="utf-8")
-    assert read_managed_runtime(state_path) is None and not state_path.exists()
+    stale_managed_bytes = state_path.read_bytes()
+    assert read_managed_runtime(state_path) is None
+    assert state_path.read_bytes() == stale_managed_bytes
     claim = tmp_path / "start.lock"
     with (
         managed_start_claim(claim),

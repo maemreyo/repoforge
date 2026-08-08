@@ -63,7 +63,21 @@ class JsonRuntimeStore:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def read(self) -> RuntimeRecord | None:
+    @contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path = self.path.with_name(f"{self.path.name}.lock")
+        descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+    def _read_unlocked(self) -> RuntimeRecord | None:
         if not self.path.is_file():
             return None
         try:
@@ -138,11 +152,14 @@ class JsonRuntimeStore:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigError(f"Invalid runtime state fields in {self.path}: {exc}") from exc
+        return record
+
+    @staticmethod
+    def _observe(record: RuntimeRecord) -> RuntimeRecord | None:
         if record.pid is not None and (
             record.process_identity is None
             or process_identity(record.pid) != record.process_identity
         ):
-            self.clear()
             return None
         if record.child_pid is not None and (
             record.child_process_identity is None
@@ -156,21 +173,43 @@ class JsonRuntimeStore:
                 last_error_code="CHILD_IDENTITY_MISMATCH",
                 last_error="Recorded tunnel child is no longer the owned process",
             )
-            self.write(degraded)
             return degraded
         return record
 
-    def write(self, record: RuntimeRecord) -> None:
+    def read(self) -> RuntimeRecord | None:
+        record = self._read_unlocked()
+        return None if record is None else self._observe(record)
+
+    def _write_unlocked(self, record: RuntimeRecord) -> None:
         payload = asdict(record)
         payload["phase"] = record.phase.value
         self._atomic(self.path, payload)
 
+    def write(self, record: RuntimeRecord) -> None:
+        with self._exclusive():
+            self._write_unlocked(record)
+
     def clear(self, *, expected_pid: int | None = None) -> None:
-        if expected_pid is not None:
-            current = self.read()
-            if current is not None and current.pid != expected_pid:
+        with self._exclusive():
+            current = self._read_unlocked()
+            if expected_pid is not None and current is not None and current.pid != expected_pid:
                 return
-        self.path.unlink(missing_ok=True)
+            self.path.unlink(missing_ok=True)
+
+    def reconcile(self) -> RuntimeRecord | None:
+        """Repair one stale observation after re-reading under the writer lock."""
+
+        with self._exclusive():
+            record = self._read_unlocked()
+            if record is None:
+                return None
+            observed = self._observe(record)
+            if observed is None:
+                self.path.unlink(missing_ok=True)
+                return None
+            if observed != record:
+                self._write_unlocked(observed)
+            return observed
 
     def peek_restart_evidence(self) -> tuple[int, str | None] | None:
         """Read `restarts_total`/`last_restart_at` straight off disk, bypassing the

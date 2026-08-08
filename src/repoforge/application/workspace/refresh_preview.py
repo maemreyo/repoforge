@@ -46,7 +46,13 @@ def require_refresh_snapshot(
     expected_fingerprint: str,
 ) -> tuple[str, str]:
     head = ctx.git.head_sha(path)
-    fingerprint = read_fingerprint(ctx.fingerprint_cache, workspace_id, ctx.git, path).fingerprint
+    fingerprint = read_fingerprint(
+        ctx.fingerprint_cache,
+        workspace_id,
+        ctx.git,
+        path,
+        persist=False,
+    ).fingerprint
     if head != expected_head_sha or fingerprint != expected_fingerprint:
         raise WorkspaceError(
             "STALE_REFRESH_PREVIEW: workspace HEAD or fingerprint changed",

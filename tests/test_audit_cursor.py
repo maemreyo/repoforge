@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,29 @@ class _AdvancingClock:
 
 def _sink(tmp_path: Path, clock: _AdvancingClock | None = None) -> JsonlAuditSink:
     return JsonlAuditSink(tmp_path, clock=clock or _AdvancingClock())
+
+
+def test_concurrent_sink_instances_allocate_one_global_sequence(tmp_path: Path) -> None:
+    sinks = (_sink(tmp_path), _sink(tmp_path))
+    start = threading.Barrier(2)
+
+    def write(sink: JsonlAuditSink, action: str) -> None:
+        start.wait(timeout=2.0)
+        sink.record(action, success=True, details={})
+
+    threads = (
+        threading.Thread(target=write, args=(sinks[0], "a")),
+        threading.Thread(target=write, args=(sinks[1], "b")),
+    )
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    assert all(not thread.is_alive() for thread in threads)
+    page = read_audit_events_since(tmp_path / "audit.jsonl", cursor=0)
+    assert sorted(event["action"] for event in page.events) == ["a", "b"]
+    assert [event["seq"] for event in page.events] == [1, 2]
 
 
 def test_seq_is_monotonic_and_survives_a_fresh_sink_instance(tmp_path: Path) -> None:
@@ -79,6 +103,27 @@ def test_two_reads_around_a_prune_lose_nothing_and_duplicate_nothing(tmp_path: P
         e["action"] for e in second_page.events
     ]
     assert all_actions == ["a", "b", "c", "d", "e"]
+
+
+def test_prune_failure_preserves_the_original_audit_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sink = _sink(tmp_path)
+    sink.record("a", success=True, details={})
+    sink.record("b", success=True, details={})
+    path = tmp_path / "audit.jsonl"
+    original = path.read_bytes()
+    query = importlib.import_module("repoforge.adapters.audit.query")
+
+    def fail_atomic_write(_path: Path, _text: str, **_kwargs: object) -> None:
+        raise OSError("simulated atomic replacement failure")
+
+    monkeypatch.setattr(query, "atomic_write_text", fail_atomic_write)
+
+    with pytest.raises(ConfigError, match="Cannot write audit log"):
+        prune_audit_log(path, before="2026-07-18T00:00:03+00:00")
+
+    assert path.read_bytes() == original
 
 
 def test_cursor_older_than_the_watermark_reports_cursor_gap(tmp_path: Path) -> None:
